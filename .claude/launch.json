@@ -1,0 +1,32 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ACB Trader — EOD Scan (immediate)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["main.py", "--now"],
+      "port": null
+    },
+    {
+      "name": "ACB Trader — Scheduled Daemon (5:04 PM ET Mon–Thu)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["main.py"],
+      "port": null,
+      "autoPort": true
+    },
+    {
+      "name": "ACB Trader — Backtest",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-X", "utf8", "-m", "acb_trader.backtest.run_backtest"],
+      "port": null,
+      "autoPort": true
+    },
+    {
+      "name": "ACB Trader — Optimizer",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-X", "utf8", "-m", "acb_trader.backtest.optimizer", "--all"],
+      "port": null,
+      "autoPort": true
+    }
+  ]
+}

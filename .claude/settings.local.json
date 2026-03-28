@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_start",
+      "Bash(python -X utf8 -m acb_trader.backtest.run_backtest)"
+    ]
+  }
+}
