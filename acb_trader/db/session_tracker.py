@@ -1,11 +1,14 @@
 """
 ACB Trader — Session Tracker
-Persists the data circuit breakers need across EOD runs.
+Persists the data circuit breakers need across EOD runs, plus the persistent
+trade log used by the weekly review automation.
 
-Stores a lightweight JSON file next to this module:
-    acb_trader/db/session_state.json
+Stores lightweight files next to this module:
+    acb_trader/db/session_state.json   — circuit-breaker state
+    acb_trader/db/trade_log.jsonl      — one TradeRecord per line (live trades)
+    acb_trader/db/discard_log.jsonl    — one DiscardedSetup per line
 
-Fields:
+Fields in session_state.json:
   daily_open_date     — ISO date string for today
   daily_open_balance  — account balance at the start of today's session
   weekly_open_date    — ISO date string for this Monday
@@ -16,16 +19,27 @@ Usage in main.py:
     from acb_trader.db.session_tracker import (
         get_or_set_daily_open, get_or_set_weekly_open,
         get_consecutive_losses, record_trade_result,
+        log_trade, log_discard, get_week_trades, get_week_discards,
     )
 """
 
 from __future__ import annotations
 import json
 import os
-from datetime import datetime, timedelta
+import re
+import logging
+from datetime import datetime, date, timedelta
+from typing import TYPE_CHECKING
 from acb_trader.config import ET
 
-_SESSION_FILE = os.path.join(os.path.dirname(__file__), "session_state.json")
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from acb_trader.models import TradeRecord, DiscardedSetup
+
+_SESSION_FILE  = os.path.join(os.path.dirname(__file__), "session_state.json")
+_TRADE_LOG     = os.path.join(os.path.dirname(__file__), "trade_log.jsonl")
+_DISCARD_LOG   = os.path.join(os.path.dirname(__file__), "discard_log.jsonl")
 
 
 # ── LOW-LEVEL I/O ─────────────────────────────────────────────────────────────
@@ -124,3 +138,149 @@ def compute_account_metrics(balance: float) -> tuple[float, float, int]:
     consec_loss  = get_consecutive_losses()
 
     return daily_pnl, weekly_dd, consec_loss
+
+
+# ── TRADE LOG (weekly review persistence) ────────────────────────────────────
+
+def _dt_to_str(dt) -> str:
+    """Serialize datetime to ISO string without microseconds."""
+    if dt is None:
+        return ""
+    if isinstance(dt, datetime):
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+    if isinstance(dt, date):
+        return dt.isoformat()
+    return str(dt)
+
+
+def _parse_dt(s: str) -> datetime:
+    """Parse ISO datetime string robustly (strips tz offset before parsing)."""
+    if not s:
+        return datetime.min
+    # Strip timezone offset (+HH:MM, -HH:MM or Z) so strptime works on Python < 3.11
+    clean = re.sub(r'([+-]\d{2}:\d{2}|Z)$', '', s).strip()
+    try:
+        return datetime.strptime(clean, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        try:
+            return datetime.strptime(clean, "%Y-%m-%d")
+        except ValueError:
+            return datetime.min
+
+
+def _parse_date(s: str) -> date:
+    if not s:
+        return date.min
+    try:
+        return date.fromisoformat(s[:10])
+    except ValueError:
+        return date.min
+
+
+def log_trade(record: "TradeRecord") -> None:
+    """
+    Append a completed TradeRecord to the persistent trade log (trade_log.jsonl).
+    Called from main.py after every live trade close.
+    """
+    row = {
+        "trade_id":      record.trade_id,
+        "pair":          record.pair,
+        "pattern":       record.pattern,
+        "direction":     record.direction,
+        "trade_type":    record.trade_type,
+        "score":         record.score,
+        "session":       record.session,
+        "entry_price":   record.entry_price,
+        "entry_time":    _dt_to_str(record.entry_time),
+        "stop_price":    record.stop_price,
+        "lot_size":      record.lot_size,
+        "target_1":      record.target_1,
+        "target_2":      record.target_2,
+        "target_3":      record.target_3,
+        "exit_price":    record.exit_price,
+        "exit_time":     _dt_to_str(record.exit_time),
+        "terminal_state":record.terminal_state,
+        "pips":          record.pips,
+        "r_multiple":    record.r_multiple,
+        "notes":         record.notes,
+    }
+    try:
+        with open(_TRADE_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception as e:
+        logger.error(f"Failed to log trade {record.trade_id} to {_TRADE_LOG}: {e}", exc_info=True)
+
+
+def log_discard(discard: "DiscardedSetup") -> None:
+    """
+    Append a DiscardedSetup to the persistent discard log (discard_log.jsonl).
+    Called from main.py alongside detect_setups() discards each evening.
+    """
+    row = {
+        "pair":              discard.pair,
+        "pattern":           discard.pattern,
+        "direction":         discard.direction,
+        "score":             discard.score,
+        "reason":            discard.reason,
+        "discarded_at":      _dt_to_str(discard.discarded_at),
+        "would_have_hit_t1": discard.would_have_hit_t1,
+        "entry_price":       discard.entry_price,
+        "stop_price":        discard.stop_price,
+        "target_1":          discard.target_1,
+    }
+    try:
+        with open(_DISCARD_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception as e:
+        logger.error(f"Failed to log discard for {discard.pair} to {_DISCARD_LOG}: {e}", exc_info=True)
+
+
+def get_week_trades(monday: date) -> list:
+    """
+    Return a list of TradeRecord-like dicts for the Mon–Fri window
+    starting at *monday*.  Kept as dicts to avoid a heavy import chain;
+    build_weekly_review() reads the fields it needs directly.
+    """
+    friday = monday + timedelta(days=4)
+    results = []
+    if not os.path.exists(_TRADE_LOG):
+        return results
+    with open(_TRADE_LOG, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+                entry_date = _parse_dt(d.get("entry_time", "")).date()
+                if monday <= entry_date <= friday:
+                    results.append(d)
+            except Exception as e:
+                logger.warning(f"Error parsing trade log line: {e} | Line: {line}")
+                continue
+    return results
+
+
+def get_week_discards(monday: date) -> list:
+    """
+    Return a list of DiscardedSetup-like dicts for the Mon–Fri window
+    starting at *monday*.
+    """
+    friday = monday + timedelta(days=4)
+    results = []
+    if not os.path.exists(_DISCARD_LOG):
+        return results
+    with open(_DISCARD_LOG, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+                disc_date = _parse_dt(d.get("discarded_at", "")).date()
+                if monday <= disc_date <= friday:
+                    results.append(d)
+            except Exception as e:
+                logger.warning(f"Error parsing discard log line: {e} | Line: {line}")
+                continue
+    return results

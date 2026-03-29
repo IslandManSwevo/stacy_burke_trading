@@ -32,10 +32,14 @@ VERBOSE            = True                  # Print every signal and trade
 EXPORT_CSV         = True                  # Save trades to backtest_results.csv
 DOWNLOAD_FROM_MT5  = True                  # Set True to pull direct from MT5
 
-# Which pairs to backtest (subset of all baskets for speed)
+# Which pairs to backtest — full basket coverage.
+# CSV files must exist in backtest_data/ as {PAIR}_D1.csv
+# Note: index/oil symbols in CSVs use the internal names (SP500, USOIL etc.)
+# not the MT5 broker names — the SYMBOL_MAP in config.py handles the translation
+# at download time.
 PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "USDCHF",
-    "GBPJPY", "EURJPY", "XAUUSD",
+    "AUDUSD", "NZDUSD", "USDCAD", "XAUUSD", "USOIL", "SP500",
 ]
 
 # ── DOWNLOAD FROM MT5 (optional) ─────────────────────────────────────────────
@@ -93,9 +97,18 @@ if EXPORT_CSV:
     if not discard_df.empty:
         top = discard_df.groupby(["pattern", "reason"]).size().reset_index(name="count")
         top = top.sort_values("count", ascending=False)
-        top.to_csv("backtest_discards.csv", index=False)
-        print(f"\nDiscard summary saved: backtest_discards.csv")
+        top.to_csv("backtest_discards_summary.csv", index=False)
+        print(f"\nDiscard summary saved: backtest_discards_summary.csv")
         print(top.to_string(index=False))
+
+    # ── DISCARD ANALYSIS: would_have_hit_t1 ───────────────────────────────────
+    # For every BELOW_MIN_SCORE discard, simulate whether T1 or stop would have
+    # been hit within 3 bars. Tells us objectively if our score floor is too tight.
+    # Verdict key:
+    #   FILTER_TOO_TIGHT  → T1 hit rate ≥ 50% (we're blocking profitable setups)
+    #   FILTER_MARGINAL   → T1 hit rate 35–49% (borderline — watch but don't change yet)
+    #   FILTER_WORKING    → T1 hit rate < 35% (filter is correct, keep it)
+    engine.discard_analysis_csv(lookahead_bars=3, filepath="backtest_discards_would_have_hit.csv")
 
 # ── EQUITY CURVE PLOT (optional — requires matplotlib) ────────────────────────
 

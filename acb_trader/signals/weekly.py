@@ -5,11 +5,11 @@ Maps the weekly + monthly cycle, computes anchors, Opening Range, and 3HC/3LC co
 
 from __future__ import annotations
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional
 from acb_trader.config import ET, MONTHLY_RESET_DAYS, MONTHLY_FRONTSIDE_DAYS, MIN_OPENING_RANGE_PIPS
 from acb_trader.db.models import (
-    WeeklyTemplate, WeeklyAnchors, OpeningRange, CloseCountdown, DayRole
+    WeeklyTemplate, WeeklyAnchors, OpeningRange, CloseCountdown, DayRole, WeeklyReviewReport
 )
 from acb_trader.data.levels import snap_to_quarter, get_pip_size, compute_close_streak, price_to_pips
 
@@ -242,3 +242,73 @@ def _confidence(template_type: str, close_streak: int, countdown: CloseCountdown
     if template_type in ("REVERSAL_WEEK", "BREAKOUT_WEEK") and abs(close_streak) >= 2:
         return "MEDIUM"
     return "LOW"
+
+
+# ── WEEKLY REVIEW ────────────────────────────────────────────────────────────
+
+def build_weekly_review(monday: date, weekly_pnl_pct: float = 0.0) -> WeeklyReviewReport:
+    """
+    Aggregate completed trades and discards for the Mon–Fri window starting at
+    *monday* into a WeeklyReviewReport.  Called by run_weekly_review() in main.py
+    every Friday after the EOD run.
+
+    Parameters
+    ----------
+    monday          : date — Monday of the week to aggregate (auto-computed in main.py)
+    weekly_pnl_pct  : float — (balance_friday - balance_monday) / balance_monday,
+                      fetched from session_tracker in the caller.
+    """
+    from acb_trader.db.session_tracker import get_week_trades, get_week_discards
+    from acb_trader.config import ET
+
+    friday = monday + timedelta(days=4)
+    trades   = get_week_trades(monday)    # list of raw dicts
+    discards = get_week_discards(monday)  # list of raw dicts
+
+    total  = len(trades)
+    wins   = sum(1 for t in trades if float(t.get("r_multiple", 0)) > 0)
+    losses = sum(1 for t in trades if float(t.get("r_multiple", 0)) < 0)
+    win_rate   = wins / total if total > 0 else 0.0
+    total_pips = sum(float(t.get("pips", 0)) for t in trades)
+    total_r    = sum(float(t.get("r_multiple", 0)) for t in trades)
+
+    best  = max(trades, key=lambda t: float(t.get("r_multiple", 0)), default=None)
+    worst = min(trades, key=lambda t: float(t.get("r_multiple", 0)), default=None)
+    best_str  = f"{best['pair']} {float(best['r_multiple']):+.2f}R"  if best  else None
+    worst_str = f"{worst['pair']} {float(worst['r_multiple']):+.2f}R" if worst else None
+
+    # Per-pattern breakdown
+    breakdown: dict = {}
+    for t in trades:
+        p = t.get("pattern", "UNKNOWN")
+        if p not in breakdown:
+            breakdown[p] = {"trades": 0, "wins": 0, "total_r": 0.0}
+        breakdown[p]["trades"] += 1
+        r = float(t.get("r_multiple", 0))
+        if r > 0:
+            breakdown[p]["wins"] += 1
+        breakdown[p]["total_r"] = round(breakdown[p]["total_r"] + r, 2)
+
+    # Discard hindsight: how many discarded setups would have hit T1
+    discards_hit = sum(
+        1 for d in discards
+        if d.get("would_have_hit_t1") is True
+    )
+
+    return WeeklyReviewReport(
+        week_start=monday,
+        week_end=friday,
+        total_trades=total,
+        wins=wins,
+        losses=losses,
+        win_rate=win_rate,
+        total_pips=round(total_pips, 1),
+        total_r=round(total_r, 2),
+        best_trade=best_str,
+        worst_trade=worst_str,
+        pattern_breakdown=breakdown,
+        discards_would_have_hit=discards_hit,
+        discards_total=len(discards),
+        weekly_pnl_pct=weekly_pnl_pct,
+        generated_at=datetime.now(ET),
+    )

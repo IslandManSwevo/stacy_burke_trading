@@ -19,7 +19,10 @@ DATA_DIR         = "backtest_data"
 START_DATE       = "2023-01-01"
 END_DATE         = "2024-12-31"
 STARTING_BALANCE = 10_000.0
-PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "GBPJPY", "EURJPY", "USDCHF", "XAUUSD"]
+PAIRS = [
+    "EURUSD", "GBPUSD", "USDJPY", "USDCHF",
+    "AUDUSD", "NZDUSD", "USDCAD", "XAUUSD", "USOIL", "SP500"
+]
 
 
 @dataclass

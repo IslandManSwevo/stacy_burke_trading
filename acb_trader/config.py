@@ -12,8 +12,15 @@ ET = ZoneInfo("America/New_York")
 RISK_PER_TRADE_PCT   = 0.01    # 1% account risk per trade
 MIN_TARGET_PIPS      = 50      # Minimum distance to Target 1 (all instruments)
 FIVE_STAR_SCORE      = 9       # Score threshold for FIVE_STAR_SCALABLE tier
-MIN_SETUP_SCORE      = 7       # Minimum score — aligned with 100-Lot Litmus Test floor (Skill §8)
+MIN_SETUP_SCORE      = 7       # Optimizer-confirmed optimal threshold
 ATR_PERIOD           = 14
+
+# ── IFB VOLUME EXPANSION ─────────────────────────────────────────────────────
+# Addresses the R:R blocker: IFB false-break day should show expanding tick volume
+# vs the compressed inside day — confirms institutional participation on rejection.
+# Purely additive: stacks with R:R bonus but provides an independent path to floor.
+IFB_VOL_EXPANSION_RATIO = 1.5   # false-break day vol / inside day vol threshold
+IFB_VOL_EXPANSION_BONUS = 2     # score points awarded when expansion confirmed
 
 # ── STOPS (pips) ──────────────────────────────────────────────────────────────
 MAX_STOP_PIPS = {
@@ -49,11 +56,18 @@ INSTRUMENT_CLASS = {
 }
 
 # ── INSTRUMENT BASKETS ────────────────────────────────────────────────────────
+# Scan order: agent trades the top-ranked pair per basket only.
+# COMMODITY now holds the FX commodity-proxy pairs (AUD, CAD) — the physical
+# commodities (gold, oil, indices) each have their own dedicated baskets so
+# they are ranked against their natural peers, not against FX pairs.
 BASKETS = {
     "USD_MAJORS":  ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD"],
     "GBP_CROSSES": ["GBPJPY", "GBPAUD", "GBPCAD", "GBPCHF", "GBPNZD"],
     "JPY_CROSSES": ["EURJPY", "AUDJPY", "CADJPY", "NZDJPY", "CHFJPY"],
-    "COMMODITY":   ["XAUUSD", "USOIL", "AUDUSD", "USDCAD"],
+    "COMMODITY":   ["AUDUSD", "USDCAD"],        # FX commodity proxies
+    "METALS":      ["XAUUSD"],                  # Gold (XAGUSD addable once data available)
+    "OIL":         ["USOIL", "UKOIL"],          # WTI + Brent
+    "INDICES":     ["SP500", "NAS100", "DJ30"], # US equity indices (NY equity hour only)
 }
 
 # ── SESSION TIMES (ET, 24h) ───────────────────────────────────────────────────
@@ -77,8 +91,13 @@ NY_CLOSE_MINUTE      = 0
 EOD_RUN_OFFSET_MIN   = 5       # Fire EOD run 5 min after NY close
 
 # ── EMA COIL ─────────────────────────────────────────────────────────────────
-EMA_COIL_PERIODS     = [9, 20, 50]          # EMAs used for coil detection
-EMA_COIL_TIGHT_MULT  = 0.5                  # Spread ≤ 0.5 × ATR14 = coil tight
+# Daily-bar proxy for EMA coil. The playbook's 5-period coil [8,21,55,100,200]
+# is designed for intraday (15-min) charts. On daily bars, requiring 200 EMA
+# convergence within 0.5×ATR is nearly impossible — it never fires.
+# The 3-period proxy [9,20,50] is practical for daily bars: fires when the
+# market is genuinely coiling on the daily timeframe.
+EMA_COIL_PERIODS     = [9, 20, 50]              # Daily-bar proxy (intraday uses full 5)
+EMA_COIL_TIGHT_MULT  = 0.3                  # Spread ≤ 0.3 × ATR14 = coil tight (tighter = more selective)
 EMA_ENTRY_PERIOD     = 20                   # 20 EMA on 5-min chart = entry trigger
 COIL_SIDEWAYS_BARS   = 3                    # Min consecutive sideways 15-min bars
 TWO_SIDED_PIPS       = 15                   # ACB failure threshold post-entry
@@ -101,7 +120,7 @@ MONTHLY_FRONTSIDE_DAYS = 10                 # Days 4-10 = FRONTSIDE
 
 # ── WATCHLIST ────────────────────────────────────────────────────────────────
 WATCHLIST_MIN_CRITERIA = 1                  # Pairs meeting ≥1 criteria are scanned
-ANCHOR_CONFLUENCE_PIPS = 50                 # Entry must be within 50 pips of anchor (Daily Close sensitivity)
+ANCHOR_CONFLUENCE_PIPS = 50                 # Restored to 50 for USD Major precision (Final Calibration)
 
 # ── POSITION STRUCTURE ───────────────────────────────────────────────────────
 SESSION_TRADE_TRANCHES   = {"A": 1.0}              # 100% out at T1
@@ -111,15 +130,11 @@ FIVE_STAR_TRANCHES       = {"A": 0.50, "B": 0.30, "C": 0.20}
 FOREXFACTORY_CALENDAR_URL = "https://www.forexfactory.com/calendar"
 NEWS_BLOCK_WINDOW_HOURS   = 1               # Block 1 hour before + 3 hours after MRN
 
-# ── PATTERN FLAGS ────────────────────────────────────────────────────────────
-# Patterns listed here still fire through detection & scoring but are flagged
-# [MONITOR ONLY] in Telegram alerts — no trade execution intended.
-# Decision log: PARABOLIC_REVERSAL added 2026-03-28.
-#   Backtest (2023-2024): 4 trades, 25% WR, -2.91R net. Streak relaxation rejected
-#   (tested: 8/9 additional trades were losses, +7.7R outlier was USDJPY April 2024
-#   yen carry event, not pattern edge). Proximity fix applied — still negative.
-#   Keeping detector live to observe live price action before deciding to remove.
-MONITOR_ONLY_PATTERNS: set[str] = {"PARABOLIC_REVERSAL"}
+# Patterns that fire through detection & scoring but are flagged [MONITOR ONLY] in Telegram.
+# Single source of truth: acb_trader/signals/patterns.py (PatternDef.monitor_only=True).
+# To gate/ungate a pattern: edit monitor_only in patterns.py only — this re-export keeps
+# all existing imports (engine.py, setups.py, etc.) working unchanged.
+from acb_trader.signals.patterns import MONITOR_ONLY_PATTERNS  # noqa: E402
 
 # ── TELEGRAM ─────────────────────────────────────────────────────────────────
 # Set via environment variables — never hardcode
@@ -127,13 +142,35 @@ MONITOR_ONLY_PATTERNS: set[str] = {"PARABOLIC_REVERSAL"}
 # TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
 
 # ── PEPPERSTONE SYMBOL MAP ───────────────────────────────────────────────────
+# Internal name → Pepperstone MT5 symbol name.
+# Verify index/oil symbols in MT5 under View → Symbols → CFDs.
 SYMBOL_MAP = {
+    # FX — USD Majors
     "EURUSD": "EURUSD",
     "GBPUSD": "GBPUSD",
     "USDJPY": "USDJPY",
-    "XAUUSD": "XAUUSD",
-    "SP500":  "SP500",      # check — may be "US500"
-    "NAS100": "NAS100",     # check — may be "USTEC"
-    "DJ30":   "DJ30",       # check — may be "US30"
-    "USOIL":  "USOIL",      # check — may be "XTIUSD"
+    "USDCHF": "USDCHF",
+    "USDCAD": "USDCAD",
+    "AUDUSD": "AUDUSD",
+    "NZDUSD": "NZDUSD",
+    # FX — Crosses
+    "GBPJPY": "GBPJPY",
+    "GBPAUD": "GBPAUD",
+    "GBPCAD": "GBPCAD",
+    "GBPCHF": "GBPCHF",
+    "GBPNZD": "GBPNZD",
+    "EURJPY": "EURJPY",
+    "AUDJPY": "AUDJPY",
+    "CADJPY": "CADJPY",
+    "NZDJPY": "NZDJPY",
+    "CHFJPY": "CHFJPY",
+    # Metals
+    "XAUUSD": "XAUUSD",        # Gold vs USD — standard across all brokers
+    # Oil  (Pepperstone: check View → Symbols → CFDs → Energy)
+    "USOIL":  "XTIUSD",        # WTI Crude — Pepperstone uses XTIUSD
+    "UKOIL":  "XBRUSD",        # Brent Crude — Pepperstone uses XBRUSD
+    # Indices  (Pepperstone: check View → Symbols → CFDs → Indices)
+    "SP500":  "US500",         # S&P 500 — Pepperstone uses US500
+    "NAS100": "US100",         # Nasdaq 100 — Pepperstone uses US100
+    "DJ30":   "US30",          # Dow Jones — Pepperstone uses US30
 }

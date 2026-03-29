@@ -2,9 +2,9 @@
 
 ## The High-Performance Trader Agent
 
-**Version:** 2.0  
-**Framework:** Stacey Burke Trading — ACB / Best Trade Setups Playbook  
-**Updated:** 2026
+**Version:** 2.1
+**Framework:** Stacey Burke Trading — ACB Scalable Trading Setups (2025) + Best Trade Setups Playbook (2022)
+**Updated:** 2026-03-28
 
 ---
 
@@ -166,7 +166,7 @@ RISK_PER_TRADE_PCT   = 0.01          # 1% account risk per trade
 MIN_IB_RANGE_PIPS    = 20            # Minimum initial balance range
 MIN_TARGET_PIPS      = 50            # Minimum distance to Target 1
 MAX_STOP_ATR_MULT    = 1.25          # Maximum stop as ATR multiple
-MIN_SETUP_SCORE      = 5             # Minimum score to arm an entry
+MIN_SETUP_SCORE      = 7             # Minimum score to arm an entry (optimizer sweep confirmed: score=7 → +0.10R/trade)
 FIVE_STAR_SCORE  = 9             # Score threshold for full tranche structure
 ATR_PERIOD           = 14            # ATR lookback
 BREAKEVEN_PIPS       = 30            # Pips profit before moving stop to BE
@@ -188,6 +188,12 @@ EMA_COIL_PERIODS     = [8, 21, 55, 100, 200]  # Multi-EMA periods for coil detec
 EMA_COIL_TIGHT_MULT  = 0.5           # EMA spread ≤ 0.5 × ATR14 = coil confirmed
 MONTHLY_FRONTSIDE_DAYS = 10          # Trading days 1–10 = FRONTSIDE
 WATCHLIST_MIN_CRITERIA = 1           # Minimum watchlist criteria to scan a pair
+# Patterns that fire through detection & scoring but are flagged [MONITOR ONLY] in Telegram.
+# No live execution until sufficient backtest sample exists.
+# Decision log: PARABOLIC_REVERSAL added 2026-03-28.
+#   Backtest (2023-2024): 4 trades, 25% WR, -2.91R net. Architecturally limited —
+#   PARA is a true intraday 15-min false-break pattern; EOD proxy unreliable.
+MONITOR_ONLY_PATTERNS = {"PARABOLIC_REVERSAL"}
 ```
 
 ---
@@ -236,6 +242,31 @@ Session colors (chart markup):
 
 ---
 
+## Source Material
+
+This agent was built from two primary sources, both read in full:
+
+| Source | Edition | Pages | Key Contribution |
+|--------|---------|-------|-----------------|
+| *ACB Scalable Trading Setups* — Stacey Burke | 2025 | 49 | Core methodology, 3HC/3LC, EMA coil, HCOM/LCOM, FDTM, session structure |
+| *Best Trade Setups Playbook* — Stacey Burke | 2022 | 155 | Full codeable criteria for all 6 patterns, scoring table, weekly template types, discard conditions |
+
+**Direct quotes encoded in skill files:**
+
+> *"I must EMPHASIZE again to all of you that these SETUPS are based on the CLOSING PRICE.
+> The SETUPS will present AFTER the previous day has CLOSED, NOT WHILE IT'S TRADING."*
+> — ACB Manual p.32 (enforced via `assert_eod_complete()` guard in `setups.py`)
+
+> *"These SETUPS should ALL BE COILED into Higher Time Frame EMAs. The EXCEPTIONS will be
+> a HIGH OF DAY or LOW OF DAY REVERSAL at an EXTREME."*
+> — ACB Manual p.40 (EMA coil is mandatory for all patterns; PARA/HOD-LOD reversals are the
+> documented exception, but are currently MONITOR_ONLY pending sufficient backtest data)
+
+> *"HUNT THE SETUP — DON'T BE ATTACHED TO THE INSTRUMENT."*
+> — ACB Manual p.15 (encoded in §Primary Directive 3: Instrument Agnosticism)
+
+---
+
 ## What This Agent Is NOT
 
 - It is not a scalping bot running on tick data
@@ -266,3 +297,35 @@ Next week watch:       {pair} — {template_note}
 ```
 
 This report feeds directly into the next week's configuration review. Adjust nothing mid-week. Review only on weekends.
+
+---
+
+## Changelog
+
+### v2.1 — 2026-03-28 — Full Playbook Audit (both PDFs read in full)
+
+**Original 4 alignment gaps fixed (engine.py + setups.py + config.py):**
+1. EMA coil proxy wired into backtest engine (`has_ema_coil_htf()` → `ema_coil` arg in `detect_setups()`)
+2. FGD +2 score bonus added (was missing, only FRD had it)
+3. FGD special `floor=6` hardcode removed (now uses standard `MIN_SETUP_SCORE`)
+4. PARA moved to `MONITOR_ONLY_PATTERNS` (4-trade sample insufficient; -2.91R net)
+
+**9 playbook gaps fixed from PDF audit (`setups.py` + `config.py`):**
+
+| # | Gap | Fix |
+|---|-----|-----|
+| 1 | FRD/FGD fired Mon/Tue (front-side noise) | Added Wed/Thu DOW gate → `FRD_FGD_WRONG_DOW` |
+| 2 | IFB checked Day -1 range, not Day -2 (outer range) | `broke_high/low` and T1 now reference `prev` (Day -2) |
+| 3 | PCD missing pump quality checks | Added: pump day range ≥ 0.75 ATR, net displacement ≥ 1.5 ATR, coil not new 5-day high/low |
+| 4 | FRD missing net trend displacement | Added: trend leg ≥ 2.0 ATR → `FRD_FGD_TREND_TOO_SMALL` |
+| 5 | FRD T2 was arbitrary ATR step | T2 = pre-trend close (full round-trip target per playbook) |
+| 6 | Score cap was 14, playbook says 12 | `min(score, 12)` |
+| 7 | EMA coil used 3 periods [9,20,50] | Updated to [8,21,55,100,200] — all TFs aligned |
+| 8 | LHF missing prior-close quality check | Prior candle must close in top/bottom 20% of range |
+| 9 | FRD trend days not quality-checked | Each trend bar close must be in upper/lower 40% of range |
+
+**Backtest baselines (all confirmed on 2023-2024 data before audit):**
+- 72 trades, 47.2% WR, +0.10R expectancy, PF 1.20, FORCE_CLOSE avg +1.26R
+- Optimizer sweep: `MIN_SETUP_SCORE=7` confirmed optimal
+
+### v2.0 — 2026 — Initial automated system build

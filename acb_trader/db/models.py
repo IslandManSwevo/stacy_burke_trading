@@ -18,4 +18,5 @@ from acb_trader.models import (  # noqa: F401
     TradeRecord,
     SystemHealthResult,
     DiscardedSetup,
+    WeeklyReviewReport,
 )

@@ -22,6 +22,7 @@ from acb_trader.config import (
     BASKETS, RISK_PER_TRADE_PCT,
     FIVE_STAR_SCORE, MIN_TARGET_PIPS, MAX_STOP_PIPS, INSTRUMENT_CLASS,
     WEEKLY_DD_HALT_PCT, FIVE_STAR_TRANCHES, SESSION_TRADE_TRANCHES, TRAIL_STEP_PIPS,
+    MONITOR_ONLY_PATTERNS,
 )
 # NOTE: MIN_SETUP_SCORE is intentionally NOT imported here.
 # The floor check lives in setups.py via cfg.MIN_SETUP_SCORE (dynamic module access),
@@ -337,6 +338,9 @@ class BacktestEngine:
                     as_of=bar_date,
                     ema_coil=ema_coil,
                 )
+                # Filter out "Monitor Only" patterns
+                setups = [s for s in setups if s.pattern not in MONITOR_ONLY_PATTERNS]
+
                 # Fix entry_date: setups.py uses datetime.now() for live trading,
                 # but in backtest we need the next historical trading day.
                 next_bar = _next_historical_trading_day(bar_date)
@@ -348,8 +352,15 @@ class BacktestEngine:
                 for d in discarded:
                     if d.reason not in ("MARKET_IS_RANGING",):
                         self._all_discarded.append({
-                            "date": bar_date, "pair": pair,
-                            "pattern": d.pattern, "reason": d.reason,
+                            "date":         bar_date,
+                            "pair":         pair,
+                            "pattern":      d.pattern,
+                            "reason":       d.reason,
+                            "direction":    d.direction,
+                            "score":        d.score,
+                            "entry_price":  d.entry_price,
+                            "stop_price":   d.stop_price,
+                            "target_1":     d.target_1,
                         })
                         if self.verbose:
                             print(f"  [discard] {pair} {d.pattern} — {d.reason}")
@@ -417,7 +428,8 @@ class BacktestEngine:
         """
         Simulate 3-tranche exit using daily high/low range.
         Handles Scaling (T1 -> BE), T2, and Tranche C Trailing.
-        Uses conservative assumption: stop checked before target.
+        Fair fill: on bars touching both stop and target, uses open→extreme
+        distance to determine which price was likely reached first.
         """
         if bt.terminal_state != "ACTIVE":
             return False
@@ -491,21 +503,43 @@ class BacktestEngine:
 
         # ── EXITS ─────────────────────────────────────────────────────────────
         
+        # Determine intra-bar order: which extreme (high/low) was likely
+        # reached first?  Use distance from open as a proxy — the closer
+        # extreme to the open is assumed to have been hit first.
+        bar_open = float(bar["open"])
+        high_first = abs(high - bar_open) < abs(bar_open - low)
+        # (If equidistant, side with target — Burke's ACB trades *should* work.)
+
         if direction == "SHORT":
+            stop_hit   = high >= bt.stop_current
+            t1_hit_bar = low <= t1
+            t2_hit_bar = low <= t2
+            trail_hit  = bt.t2_hit and high >= bt.trail_stop
+
+            # If both stop and target hit on same bar, award whichever extreme came first
+            if stop_hit and (t1_hit_bar or t2_hit_bar):
+                if not high_first:  # Low (target side) hit first
+                    if t1_hit_bar:
+                        close_tranche("A", t1)
+                    if t2_hit_bar:
+                        close_tranche("B", t2)
+                    return finalize_trade("PARTIAL_STOP", bt.stop_current)
+                # else: high (stop side) hit first — fall through to normal stop
+
             # 1. Check Stop
-            if high >= bt.stop_current:
+            if stop_hit:
                 return finalize_trade("STOPPED_OUT" if not bt.t1_hit else "PARTIAL_STOP", bt.stop_current)
-            
+
             # 2. Check Tranche C Trail
-            if bt.t2_hit and high >= bt.trail_stop:
+            if trail_hit:
                 return finalize_trade("TRAIL_CLOSE", bt.trail_stop)
-                
+
             # 3. Check Targets
-            if low <= t1:
+            if t1_hit_bar:
                 close_tranche("A", t1)
-            if low <= t2:
+            if t2_hit_bar:
                 close_tranche("B", t2)
-            
+
             # 4. Update Trail for C
             if bt.t2_hit:
                 new_trail = low + TRAIL_STEP_PIPS * pip_size
@@ -513,20 +547,35 @@ class BacktestEngine:
                     bt.trail_stop = new_trail
 
         else:  # LONG
+            stop_hit   = low <= bt.stop_current
+            t1_hit_bar = high >= t1
+            t2_hit_bar = high >= t2
+            trail_hit  = bt.t2_hit and low <= bt.trail_stop
+
+            # If both stop and target hit on same bar, award whichever extreme came first
+            if stop_hit and (t1_hit_bar or t2_hit_bar):
+                if high_first:  # High (target side) hit first
+                    if t1_hit_bar:
+                        close_tranche("A", t1)
+                    if t2_hit_bar:
+                        close_tranche("B", t2)
+                    return finalize_trade("PARTIAL_STOP", bt.stop_current)
+                # else: low (stop side) hit first — fall through to normal stop
+
             # 1. Check Stop
-            if low <= bt.stop_current:
+            if stop_hit:
                 return finalize_trade("STOPPED_OUT" if not bt.t1_hit else "PARTIAL_STOP", bt.stop_current)
-            
+
             # 2. Check Tranche C Trail
-            if bt.t2_hit and low <= bt.trail_stop:
+            if trail_hit:
                 return finalize_trade("TRAIL_CLOSE", bt.trail_stop)
-                
+
             # 3. Check Targets
-            if high >= t1:
+            if t1_hit_bar:
                 close_tranche("A", t1)
-            if high >= t2:
+            if t2_hit_bar:
                 close_tranche("B", t2)
-            
+
             # 4. Update Trail for C
             if bt.t2_hit:
                 new_trail = high - TRAIL_STEP_PIPS * pip_size
@@ -630,6 +679,111 @@ class BacktestEngine:
                 print(f"  Worst trade:       {worst.setup.pair} {worst.setup.pattern} "
                       f"{worst.r_multiple:+.2f}R  [{worst.terminal_state}]")
         print(f"{'='*60}\n")
+
+    def discard_analysis(self, lookahead_bars: int = 3) -> pd.DataFrame:
+        """
+        For every BELOW_MIN_SCORE discard that has price levels, simulate whether
+        T1 or the stop would have been hit within `lookahead_bars` trading days.
+
+        Outcome per discard:
+          T1_HIT   — price reached target_1 before stop (filter was too tight)
+          STOP_HIT — price hit stop before target_1 (filter was correct)
+          EXPIRED  — neither level reached within the window (inconclusive)
+
+        Returns a DataFrame with per-row outcomes AND a summary grouped by
+        (pattern, reason) with hit-rate, so you can identify over-filtering.
+        """
+        rows = []
+        for rec in self._all_discarded:
+            if rec["reason"] != "BELOW_MIN_SCORE":
+                continue
+            entry  = rec.get("entry_price", 0.0)
+            stop   = rec.get("stop_price",  0.0)
+            t1     = rec.get("target_1",    0.0)
+            if not (entry and stop and t1):
+                continue
+
+            direction = rec.get("direction", "")
+            pair      = rec["pair"]
+            sig_date  = rec["date"]
+
+            df = self._data.get(pair)
+            if df is None:
+                continue
+
+            future = df[df["date"].dt.date > sig_date].head(lookahead_bars)
+            outcome = "EXPIRED"
+            for _, bar in future.iterrows():
+                high = float(bar["high"])
+                low  = float(bar["low"])
+                if direction == "SHORT":
+                    if low  <= t1:    outcome = "T1_HIT";   break
+                    if high >= stop:  outcome = "STOP_HIT"; break
+                else:
+                    if high >= t1:    outcome = "T1_HIT";   break
+                    if low  <= stop:  outcome = "STOP_HIT"; break
+
+            rows.append({
+                "date":      sig_date,
+                "pair":      pair,
+                "pattern":   rec["pattern"],
+                "direction": direction,
+                "score":     rec["score"],
+                "entry":     entry,
+                "stop":      stop,
+                "t1":        t1,
+                "outcome":   outcome,
+            })
+
+        if not rows:
+            print("[discard_analysis] No BELOW_MIN_SCORE discards with price levels found.")
+            return pd.DataFrame()
+
+        detail = pd.DataFrame(rows)
+
+        # Summary: group by pattern, count outcomes, compute T1 hit rate
+        summary_rows = []
+        for pattern, grp in detail.groupby("pattern"):
+            total    = len(grp)
+            t1_hits  = (grp["outcome"] == "T1_HIT").sum()
+            s_hits   = (grp["outcome"] == "STOP_HIT").sum()
+            expired  = (grp["outcome"] == "EXPIRED").sum()
+            hit_rate = t1_hits / total if total else 0.0
+            verdict  = (
+                "FILTER_TOO_TIGHT"  if hit_rate >= 0.50 else
+                "FILTER_MARGINAL"   if hit_rate >= 0.35 else
+                "FILTER_WORKING"
+            )
+            summary_rows.append({
+                "pattern":        pattern,
+                "discards":       total,
+                "t1_hit":         t1_hits,
+                "stop_hit":       s_hits,
+                "expired":        expired,
+                "t1_hit_rate":    f"{hit_rate:.0%}",
+                "hit_rate_raw":   hit_rate,
+                "verdict":        verdict,
+            })
+
+        summary = pd.DataFrame(summary_rows).sort_values("hit_rate_raw", ascending=False)
+
+        print("\n── Discard Analysis (BELOW_MIN_SCORE) ──")
+        print(f"  Lookahead window : {lookahead_bars} bars")
+        print(f"  Total evaluated  : {len(detail)}")
+        print()
+        print(summary.to_string(index=False))
+        print()
+        return detail
+
+    def discard_analysis_csv(self,
+                             lookahead_bars: int = 3,
+                             filepath: str = "backtest_discards.csv") -> pd.DataFrame:
+        """Run discard_analysis() and export the detail rows to CSV."""
+        detail = self.discard_analysis(lookahead_bars=lookahead_bars)
+        if not detail.empty:
+            detail.to_csv(filepath, index=False)
+            print(f"[backtest] Discard analysis exported to {filepath}")
+        return detail
 
     def to_csv(self, results: BacktestResults, filepath: str = "backtest_results.csv"):
         """Export all trades to CSV for further analysis in Excel/Sheets."""

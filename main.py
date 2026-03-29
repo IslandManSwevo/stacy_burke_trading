@@ -9,7 +9,7 @@ import os
 import sys
 import schedule
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import pandas as pd
 
 from acb_trader.config import (
@@ -19,16 +19,19 @@ from acb_trader.data.feed import BrokerFeed
 from acb_trader.data.calendar import is_news_blocked
 from acb_trader.signals.classify import classify_market_state, rank_basket
 from acb_trader.signals.watchlist import evaluate_watchlist
-from acb_trader.signals.weekly import build_weekly_template
 from acb_trader.signals.setups import detect_setups, assert_eod_complete
 from acb_trader.execution.coil import has_ema_coil_htf
 from acb_trader.execution.sizing import calculate_rr
 from acb_trader.guards.checklist import run_pre_trade_checklist, passes_100_lot_test
 from acb_trader.notifications.telegram import (
     send_eod_briefing, send_setup_armed, send_health_warnings, send_circuit_breaker,
+    send_weekly_review,
 )
 from acb_trader.db.models import AccountState
-from acb_trader.db.session_tracker import compute_account_metrics
+from acb_trader.db.session_tracker import (
+    compute_account_metrics, log_discard,
+)
+from acb_trader.signals.weekly import build_weekly_template, build_weekly_review
 
 
 # ── EOD PIPELINE ──────────────────────────────────────────────────────────────
@@ -157,6 +160,9 @@ def run_eod(feed: BrokerFeed):
                     ema_coil=ema_coil,
                 )
                 discarded_log.extend(discarded)
+                # Persist discards for weekly review hindsight analysis
+                for d in discarded:
+                    log_discard(d)
 
                 # Step 4b: News filter — skip setups where high-impact news
                 # falls within 1 hr before / 3 hrs after the entry session open
@@ -206,16 +212,53 @@ def run_eod(feed: BrokerFeed):
     print(f"\n[main] EOD run complete {datetime.now(ET).strftime('%H:%M ET')}")
 
 
+# ── WEEKLY REVIEW ────────────────────────────────────────────────────────────
+
+def run_weekly_review(feed: BrokerFeed):
+    """
+    Friday 17:30 ET: aggregate the week's trades & discards, send Telegram review.
+    Weekly P&L % is pulled from session_tracker's Monday-open balance.
+    """
+    now = datetime.now(ET)
+    print(f"\n{'='*60}")
+    print(f"ACB WEEKLY REVIEW — {now.strftime('%A %d %b %Y %H:%M ET')}")
+    print(f"{'='*60}")
+
+    monday = now.date() - timedelta(days=now.weekday())  # ISO Monday of current week
+
+    # Weekly P&L from session_tracker (set on Monday morning, compared to now)
+    weekly_pnl_pct = 0.0
+    try:
+        acc = feed.get_account()
+        _, weekly_pnl_pct, _ = compute_account_metrics(acc["balance"])
+    except Exception as e:
+        print(f"[weekly_review] Could not fetch account metrics: {e}")
+
+    report = build_weekly_review(monday, weekly_pnl_pct)
+    send_weekly_review(report)
+
+    print(
+        f"[main] Weekly review sent — "
+        f"{report.wins}/{report.total_trades} wins | "
+        f"{report.total_r:+.2f}R | "
+        f"{now.strftime('%H:%M ET')}"
+    )
+
+
 # ── SCHEDULER ─────────────────────────────────────────────────────────────────
 
 def start_scheduler(feed: BrokerFeed):
-    """Run EOD pipeline at 5:04 PM ET Mon–Thu."""
-    run_time = f"{NY_CLOSE_HOUR:02d}:{EOD_RUN_OFFSET_MIN:02d}"
-    print(f"[main] Scheduler armed — EOD run at {run_time} ET Mon–Thu")
+    """Run EOD pipeline at 5:04 PM ET Mon–Thu; weekly review at 5:30 PM ET Fri."""
+    run_time    = f"{NY_CLOSE_HOUR:02d}:{EOD_RUN_OFFSET_MIN:02d}"
+    review_time = "17:30"
+    print(f"[main] Scheduler armed — EOD run at {run_time} ET Mon–Thu | Weekly review at {review_time} ET Fri")
     schedule.every().monday.at(run_time).do(run_eod, feed=feed)
     schedule.every().tuesday.at(run_time).do(run_eod, feed=feed)
     schedule.every().wednesday.at(run_time).do(run_eod, feed=feed)
     schedule.every().thursday.at(run_time).do(run_eod, feed=feed)
+    # Friday: run EOD first (same time), then weekly review 26 min later
+    schedule.every().friday.at(run_time).do(run_eod, feed=feed)
+    schedule.every().friday.at(review_time).do(run_weekly_review, feed=feed)
 
     while True:
         schedule.run_pending()

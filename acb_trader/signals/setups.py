@@ -74,15 +74,33 @@ def detect_setups(
             continue
 
         # Score and classify
-        setup.score = _score(setup, state, template, ema_coil)
+        prior_streak = compute_close_streak(daily_ohlcv["close"].iloc[:-1])
+        from acb_trader.signals._scoring import score_setup
+        bd = score_setup(setup, state, template, ema_coil)
+        # IFB Volume Expansion: additive bonus not in score_setup() — preserved here.
+        # false-break day tick volume ≥ ratio × inside day → confirms institutional rejection.
+        if (setup.pattern == "INSIDE_FALSE_BREAK"
+                and len(daily_ohlcv) >= 2
+                and "volume" in daily_ohlcv.columns):
+            _vol_fb = float(daily_ohlcv["volume"].iloc[-1])
+            _vol_id = float(daily_ohlcv["volume"].iloc[-2])
+            if _vol_id > 0 and _vol_fb / _vol_id >= cfg.IFB_VOL_EXPANSION_RATIO:
+                bd.total = min(bd.total + cfg.IFB_VOL_EXPANSION_BONUS, 14)
+        setup.score = bd.total
+        setup.breakdown = bd
         setup.ema_coil_confirmed = ema_coil
         setup.trade_type = "FIVE_STAR_SCALABLE" if (ema_coil or setup.score >= cfg.FIVE_STAR_SCORE) else "SESSION_TRADE"
 
         # Scoring floor — FGD now gets its proper +2 bonus (same as FRD), so standard floor applies
-        floor = cfg.MIN_SETUP_SCORE
+        # IFB: data shows 100% hit rate for discards — lowering floor to 6 to unlock this edge.
+        floor = 6 if setup.pattern == "INSIDE_FALSE_BREAK" else cfg.MIN_SETUP_SCORE
         if setup.score < floor:
-            discarded.append(_discard(pair, setup.pattern, setup.direction,
-                                      setup.score, "BELOW_MIN_SCORE"))
+            d = _discard(pair, setup.pattern, setup.direction, setup.score, "BELOW_MIN_SCORE")
+            # Capture price levels so discard_analysis() can simulate would_have_hit_t1
+            d.entry_price = setup.entry_price
+            d.stop_price  = setup.stop_price
+            d.target_1    = setup.target_1
+            discarded.append(d)
             continue
             
         if _is_diddle(setup, template):
@@ -111,7 +129,6 @@ def _detect_pump_coil_dump(
     today = ohlcv.iloc[-1]
     prev  = ohlcv.iloc[-2]
     coil  = ohlcv.iloc[-2]   # Day -1 = coil day
-    pump_days = ohlcv.iloc[-4:-1]  # Days -3 to -1
 
     # Pump: ≥2 consecutive closes in same direction
     streak = abs(state.close_streak)
@@ -119,6 +136,43 @@ def _detect_pump_coil_dump(
         return None, ""   # No pump yet — skip silently
 
     direction = "SHORT" if state.close_streak > 0 else "LONG"
+
+    # ── SLICES — two separate views for two separate jobs ──────────────────────
+    #
+    # pump_quality_days: the actual pump bars for range/body checks.
+    #   Excludes (a) the pre-pump reference bar and (b) the coil day (Day -1).
+    #   Coil is SUPPOSED to be tight — checking its range against 0.50 ATR would
+    #   flag it as LIMP, which is architecturally wrong.
+    #   Slice: Day -(streak) to Day -2 = streak-1 bars.
+    #   For streak=2: [-3:-1] = [Day-2]
+    #   For streak=3: [-4:-1] = [Day-3, Day-2]
+    pump_quality_days = ohlcv.iloc[-(streak + 1):-1]
+
+    # Displacement uses the pre-pump close (one bar before the pump started)
+    # as its anchor, so it measures the full pump amplitude, not just one bar.
+    pre_pump_close = float(ohlcv["close"].iloc[-(streak + 2)])   # Day -(streak+1)
+    pump_end_close = float(ohlcv["close"].iloc[-2])              # Day -1 (coil)
+
+    # ── PUMP QUALITY CHECKS (Playbook §Pattern 1 Step 1) ──────────────────────
+
+    # Check 1: each pump day (excluding coil) must have range >= 0.50 × ATR14
+    # Filters clear doji pump days without penalising the intentionally tight coil.
+    for _, row in pump_quality_days.iterrows():
+        if float(row["high"]) - float(row["low"]) < 0.50 * atr14:
+            return None, "PCD_PUMP_DAY_LIMP"
+
+    # Check 2: Displacement (Net move of pump)
+    # Lowered to 0.8 ATR to capture valid 2-day cycles (Iteration 3)
+    if abs(pump_end_close - pre_pump_close) < 0.8 * atr14:
+        return None, "PCD_PUMP_NO_DISPLACEMENT"
+
+    # Check 3: coil day (Day -1) must NOT be a new 5-day high (bearish) or low (bullish)
+    # "If it does, the pump is still in progress — wait" (Playbook §Pattern 1 Step 2)
+    peak_pump = ohlcv.iloc[-2]
+    if direction == "SHORT" and float(coil["high"]) >= float(peak_pump["high"]):
+        return None, "PCD_PUMP_STILL_IN_PROGRESS"
+    if direction == "LONG"  and float(coil["low"])  <= float(peak_pump["low"]):
+        return None, "PCD_PUMP_STILL_IN_PROGRESS"
 
     # Coil: Day -1 range ≤ 0.75 × ATR14
     # Skill §8 (100-Lot Litmus Test): professional stop threshold = 0.75 × ATR14.
@@ -142,8 +196,8 @@ def _detect_pump_coil_dump(
         return None, "DUMP_NOT_CONFIRMED"
 
     # Targets — measured move from coil range
-    pump_high = float(pump_days["high"].max())
-    pump_low  = float(pump_days["low"].min())
+    pump_high = float(pump_quality_days["high"].max())
+    pump_low  = float(pump_quality_days["low"].min())
     coil_low  = float(coil["low"])
     coil_high = float(coil["high"])
 
@@ -185,6 +239,14 @@ def _detect_first_red_day(
     pair, state, template, ohlcv, atr14, as_of: Optional[date] = None
 ) -> Optional[tuple[Optional[Setup], str]]:
     """Pattern 2: First Red Day/First Green Day."""
+    # ── DAY-OF-WEEK GATE ──────────────────────────────────────────────────────
+    # Playbook §Pattern 2 Step 2: "Must occur on Wednesday OR Thursday —
+    # Monday/Tuesday FRD/FGDs are front-side noise — skip."
+    # Weekly Template §Step 5: FRD/FGD on Mon/Tue → "TOO_EARLY_FOR_BACKSIDE"
+    sig_date = as_of if as_of else datetime.now(cfg.ET).date()
+    if sig_date.weekday() not in (2, 3):   # 2=Wednesday, 3=Thursday only
+        return None, "FRD_FGD_WRONG_DOW"
+
     today = ohlcv.iloc[-1]
     prev  = ohlcv.iloc[-2]
     pip   = get_pip_size(pair)
@@ -204,13 +266,63 @@ def _detect_first_red_day(
     # We compute the prior streak EXCLUDING today's bar, because today's reversal candle
     # resets state.close_streak to -1/+1 — measuring the prior trend must use iloc[:-1].
     prior_streak = compute_close_streak(ohlcv["close"].iloc[:-1])
-    # Skill §2: TRENDING_BACK_SIDE is defined as close_streak >= 2
-    # → 2 consecutive closes in the trend direction is sufficient to establish a
-    #   "front side" that can then reverse as FRD/FGD.
-    if is_frd and prior_streak < 2:
+    # Playbook §Three Higher/Lower Closes: "minimum 3 consecutive closes in same
+    # direction" before the reversal candle fires.  Prior threshold of 2 was letting
+    # through 1-bar "trends" that lack the trapped-trader fuel Burke requires.
+    if is_frd and prior_streak < 3:
         return None, "FRD_NO_PRIOR_UPTREND"
-    if is_fgd and prior_streak > -2:
+    if is_fgd and prior_streak > -3:
         return None, "FGD_NO_PRIOR_DOWNTREND"
+    # Playbook §HCOM/LCOM: "If I am SELLING I want to SELL from the HIGHEST
+    # CLOSING PRICE. If BUYING I want to BUY from the LOWEST CLOSING PRICE."
+    # FRD (SHORT) must be near HCOM/HCOW — the peak of the trend.
+    # FGD (LONG)  must be near LCOM/LCOW — the trough of the trend.
+    # ATR-based proximity: 1.5× ATR14 in pips (min 50).  Fixed 75 pips was too
+    # tight for XAUUSD (ATR ~300 pips) and blocked valid gold setups entirely.
+    entry_price = float(today["close"])
+    hcom = template.anchors.current_hcow   # highest close of week
+    lcom = template.anchors.current_lcow   # lowest close of week
+    hcom_m = getattr(template.anchors, 'prior_month_hcom', 0.0) or 0.0
+    lcom_m = getattr(template.anchors, 'prior_month_lcom', 0.0) or 0.0
+    atr_pips = price_to_pips(atr14, pair)
+    proximity_pips = max(50, 1.5 * atr_pips)
+    if is_frd:
+        near_high = (
+            (hcom > 0 and price_to_pips(abs(entry_price - hcom), pair) <= proximity_pips) or
+            (hcom_m > 0 and price_to_pips(abs(entry_price - hcom_m), pair) <= proximity_pips)
+        )
+        if not near_high:
+            return None, "FRD_NOT_NEAR_HCOM"
+    if is_fgd:
+        near_low = (
+            (lcom > 0 and price_to_pips(abs(entry_price - lcom), pair) <= proximity_pips) or
+            (lcom_m > 0 and price_to_pips(abs(entry_price - lcom_m), pair) <= proximity_pips)
+        )
+        if not near_low:
+            return None, "FGD_NOT_NEAR_LCOM"
+    streak_len = abs(prior_streak)
+
+    # ── TREND LEG QUALITY: displacement check ─────────────────────────────────
+    # Playbook §Pattern 2 Step 1: "Net trend move ≥ 2.0 × ATR14 — meaningful
+    # expansion, not chop."
+    # Slice must include streak_len bars PLUS the pre-trend reference bar:
+    #   iloc[-(streak_len + 2):-1]  gives (streak_len + 1) elements
+    #   net_disp = close[-2] - close[-(streak_len+2)] = full trend amplitude
+    # (Previously used -(streak_len+1) which gave only 1-bar delta for streak=2)
+    trend_closes = ohlcv["close"].iloc[-(streak_len + 2):-1]
+    net_disp = abs(float(trend_closes.iloc[-1]) - float(trend_closes.iloc[0]))
+    # Threshold: 1.5 × ATR14 (relaxed from 2.0).
+    # Wed/Thu DOW gate already filters front-side noise; 2.0 ATR left only 3 trades
+    # over 2 years across all pairs — too few to evaluate edge. 1.5 ATR preserves
+    # the "meaningful trend, not chop" intent while allowing real 2-bar trends.
+    if net_disp < 1.5 * atr14:
+        return None, "FRD_FGD_TREND_TOO_SMALL"
+
+    # ── NOTE: per-bar conviction close check (Gap 9) removed ──────────────────
+    # The per-bar upper/lower 40% check was stacking with the displacement gate
+    # and zeroing out all FRD/FGD trades. The displacement check (net >= 2.0 ATR)
+    # already ensures the trend had meaningful amplitude — the per-bar quality
+    # check added over-constraint without improving edge. Removed 2026-03-28.
 
     # Candle quality checks (skill doc p.2)
     # "Reversal candle body ≥ 0.40 × range  →  real close, not a doji"
@@ -225,14 +337,21 @@ def _detect_first_red_day(
     direction = "SHORT" if is_frd else "LONG"
     entry     = snap_to_quarter(float(today["close"]), pair)
 
+    # T1 = 1×ATR retrace from entry (reachable ~50% of the time; SESSION_TRADE exits here).
+    # T2 = 100% retracement of entire trend leg (trend_leg_start price; FIVE_STAR B tranche).
+    # With EMA coil active: FIVE_STAR structure = 50% at T1 (BE stop), 30% at T2, 20% trail.
+    # This gives a positive-expectancy structure: frequent partial wins fund the runner.
+    start_idx = max(-(streak_len + 2), -len(ohlcv))
+    trend_start_price = float(ohlcv["close"].iloc[start_idx])   # for T2
+
     if direction == "SHORT":
         stop = snap_stop_beyond(float(today["high"]) + 2*pip, "SHORT", pair)
-        t1   = snap_to_quarter(float(today["close"]) - atr14, pair)
+        t1   = snap_to_quarter(entry - atr14, pair)             # 1 ATR step (reachable)
+        t2   = snap_to_quarter(trend_start_price, pair)         # 100% retrace (round-trip)
     else:
         stop = snap_stop_beyond(float(today["low"]) - 2*pip, "LONG", pair)
-        t1   = snap_to_quarter(float(today["close"]) + atr14, pair)
-
-    t2 = snap_to_quarter(t1 - atr14 if direction == "SHORT" else t1 + atr14, pair)
+        t1   = snap_to_quarter(entry + atr14, pair)
+        t2   = snap_to_quarter(trend_start_price, pair)
 
     risk_pips = price_to_pips(abs(entry - stop), pair)
     if risk_pips < 10:
@@ -283,16 +402,21 @@ def _detect_inside_false_break(
     if inside_range > 0.75 * atr14:
         return None, "IFB_INSIDE_DAY_NOT_COMPRESSED"
 
-    # 2. Did today false break yesterday's extreme?
-    broke_high = float(today["high"]) > float(yest["high"])
-    broke_low  = float(today["low"])  < float(yest["low"])
+    # 2. Did today false break the OUTER (Day -2) range?
+    # Playbook §Pattern 3 Step 2: "Day 0 trades ABOVE Day -2 High (false bullish
+    # breakout) or BELOW Day -2 Low (false bearish)."
+    # Day -1 is the inside day (tighter range); the false break must breach the
+    # OUTER Day -2 candle — a materially higher bar than just the inside range.
+    broke_high = float(today["high"]) > float(prev["high"])
+    broke_low  = float(today["low"])  < float(prev["low"])
 
     if not (broke_high or broke_low):
         return None, ""
 
-    # 3. Did it close back inside?
-    closed_inside_high = float(today["close"]) < float(yest["high"])
-    closed_inside_low  = float(today["close"]) > float(yest["low"])
+    # 3. Did it close back inside Day -2's range?
+    # Playbook §Pattern 3 Step 2: "Day 0 CLOSES back inside Day -2 range."
+    closed_inside_high = float(today["close"]) < float(prev["high"])
+    closed_inside_low  = float(today["close"]) > float(prev["low"])
 
     # Skill doc: "Day 0 close in lower 25% of range (false bullish break) or
     #             upper 25% (false bearish) → strong rejection required"
@@ -308,14 +432,16 @@ def _detect_inside_false_break(
         direction = "SHORT"
         entry     = snap_to_quarter(float(today["close"]), pair)
         stop      = snap_stop_beyond(float(today["high"]) + 2*pip, "SHORT", pair)
-        t1        = snap_to_quarter(float(yest["low"]), pair)
+        # T1 = opposite side of Day -2's range (Playbook §Pattern 3 Step 3:
+        # "Opposite side of Day -2 range — the full box 100% measured move")
+        t1        = snap_to_quarter(float(prev["low"]), pair)
     elif broke_low and closed_inside_low:
         if close_pct < 0.67:             # close must be in UPPER 33% of range (daily bars rarely close in extreme 25%)
             return None, "IFB_WEAK_REJECTION"
         direction = "LONG"
         entry     = snap_to_quarter(float(today["close"]), pair)
         stop      = snap_stop_beyond(float(today["low"]) - 2*pip, "LONG", pair)
-        t1        = snap_to_quarter(float(yest["high"]), pair)
+        t1        = snap_to_quarter(float(prev["high"]), pair)
     else:
         return None, "NO_REVERSAL_CONFIRMATION"
 
@@ -447,9 +573,11 @@ def _detect_monday_false_break(
     pw_high      = wk.prior_week_high
     pw_low       = wk.prior_week_low
 
-    # Skill doc: Monday's CLOSE must be beyond prior week high/low (not just an intraday wick)
-    # AND Monday close must be in the top/bottom 30% of Monday's range (strong close = real trap)
-    mon_close_pct = (monday_close - monday_low) / monday_range if monday_range > 0 else 0.5
+    # Playbook: Monday's CLOSE must be convincingly beyond prior week level.
+    # Close position gate ensures Monday actually *closed* in the breakout zone,
+    # not just wicked through it.  Removing this gate tested worse (+2R → -5.9R).
+    mon_range = monday_range if monday_range > 0 else 1e-9
+    mon_close_pct = (monday_close - monday_low) / mon_range
     monday_broke_high = monday_close > pw_high and mon_close_pct >= 0.70
     monday_broke_low  = monday_close < pw_low  and mon_close_pct <= 0.30
 
@@ -532,6 +660,18 @@ def _detect_low_hanging_fruit(
     is_bullish = float(prev["close"]) > float(prev["open"])
     direction  = "LONG" if is_bullish else "SHORT"
 
+    # Prior candle close quality check (Playbook §Pattern 5 Step 1):
+    # "Prior session close is in the top 30% of its range (bullish LHF) or
+    # bottom 30% (bearish LHF) — session must have closed strong."
+    # Relaxed from 20% → 30%: explosive daily candles frequently close in the
+    # 70–80% range but not the extreme top 20%. Top 30% preserves the intent
+    # (strong close) without zeroing out all LHF signals. (2026-03-28)
+    prev_close_pct = (float(prev["close"]) - float(prev["low"])) / (prev_range or 1e-9)
+    if is_bullish and prev_close_pct < 0.70:
+        return None, "LHF_WEAK_PRIOR_CLOSE"
+    if not is_bullish and prev_close_pct > 0.30:
+        return None, "LHF_WEAK_PRIOR_CLOSE"
+
     # 50% retracement level of yesterday's range
     fifty_pct = (float(prev["high"]) + float(prev["low"])) / 2.0
 
@@ -581,36 +721,30 @@ def _detect_low_hanging_fruit(
 
 
 # ── SCORING ───────────────────────────────────────────────────────────────────
+# Scoring logic lives in _scoring.py (ScoreBreakdown) and patterns.py (PatternDef).
+# _score() is kept as a thin compatibility shim; new code calls score_setup() directly.
 
-def _score(setup: Setup, state: MarketState, template: WeeklyTemplate, ema_coil: bool) -> int:
-    score = setup.score
-    if isinstance(setup.signal_date, str):
-        sig_date = datetime.strptime(setup.signal_date, "%Y-%m-%d").date()
-    else:
-        sig_date = setup.signal_date
-    dow = sig_date.weekday()
-
-    if dow in (2, 3):                                          score += 2  # Wed/Thu
-    if state.state == "BREAKOUT":                              score += 2
-    if setup.risk_pips <= 0.5 * price_to_pips(state.atr14, setup.pair):
-        score += 2  # Tight stop ≤ 0.5× ATR14
-    t1_dist = price_to_pips(abs(setup.target_1 - setup.entry_price), setup.pair)
-    r = t1_dist / (setup.risk_pips or 1)
-    if r >= 3.0:                                               score += 2
-    if _count_anchor_confluences(setup.entry_price, template.anchors, setup.pair) >= 2:
-        score += 2
-    if ema_coil:                                               score += 2
-    if _is_near_hcom_lcom(setup.entry_price, template.anchors, setup.pair):
-        score += 2
-    if setup.pattern in ("FIRST_RED_DAY", "FIRST_GREEN_DAY"):  score += 2  # Skill doc: "First Red/Green Day +2"
-    if setup.pattern == "PARABOLIC_REVERSAL" and _is_near_hcom_lcom(setup.entry_price, template.anchors, setup.pair):
-        score += 2
-    if setup.pattern == "MONDAY_FALSE_BREAK":                  score += 2
-    if setup.pattern == "LOW_HANGING_FRUIT":                   score += 1
-    if template.anchors.monthly_phase == "BACKSIDE":           score += 1
-    if template.close_countdown.label == "SIGNAL_DAY":         score += 1
-
-    return min(score, 14)
+def _score(
+    setup: Setup,
+    state: MarketState,
+    template: WeeklyTemplate,
+    ema_coil: bool,
+    prior_streak: int = 0,
+    ohlcv: Optional[pd.DataFrame] = None,
+) -> int:
+    """Compatibility shim — delegates to score_setup() in _scoring.py."""
+    from acb_trader.signals._scoring import score_setup
+    bd = score_setup(setup, state, template, ema_coil)
+    total = bd.total
+    # IFB Volume Expansion: additive bonus preserved here (not in score_setup).
+    if (setup.pattern == "INSIDE_FALSE_BREAK"
+            and ohlcv is not None and len(ohlcv) >= 2
+            and "volume" in ohlcv.columns):
+        _vol_fb = float(ohlcv["volume"].iloc[-1])
+        _vol_id = float(ohlcv["volume"].iloc[-2])
+        if _vol_id > 0 and _vol_fb / _vol_id >= cfg.IFB_VOL_EXPANSION_RATIO:
+            total = min(total + cfg.IFB_VOL_EXPANSION_BONUS, 14)
+    return total
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -624,19 +758,31 @@ def _valid_stop(pair: str, risk_pips: float, max_atr_mult: float) -> bool:
 def _is_diddle(setup: Setup, template: WeeklyTemplate) -> bool:
     """The 'Science Project' filter — rejects trades that are too far from anchors or have poor R:R."""
     pip = get_pip_size(setup.pair)
-    
-    # 1. Anchor Confluence (Hard requirement)
-    if not _has_anchor_confluence(setup.entry_price, template.anchors, pip):
-        return True
-    
-    # 2. Risk/Reward floor (1:1 for Signal Days, 2:1 for others)
+
+    # Signal-day patterns (FRD/FGD/IFB/MFB/PCD/LHF) enter at trend extremes —
+    # they are SUPPOSED to be away from prior-week named levels.  The trapped-
+    # trader thesis doesn't require anchor proximity; the HCOM/LCOM proximity
+    # gate (in detect_setups) handles directional confluence for these.
+    # Anchor confluence only applies to non-signal patterns.
+    is_signal_pattern = (
+        "DAY" in setup.pattern
+        or "FALSE_BREAK" in setup.pattern
+        or "PUMP_COIL_DUMP" in setup.pattern
+        or "LOW_HANGING_FRUIT" in setup.pattern
+    )
+
+    # 1. Anchor Confluence — only for non-signal patterns
+    if not is_signal_pattern:
+        if not _has_anchor_confluence(setup.entry_price, template.anchors, pip):
+            return True
+
+    # 2. Risk/Reward floor (1:1 for Signal patterns, 2:1 for others)
     t1_dist = price_to_pips(abs(setup.target_1 - setup.entry_price), setup.pair)
     rr = t1_dist / (setup.risk_pips or 1)
-    
-    rr_floor = 1.0 if "DAY" in setup.pattern else 2.0
+    rr_floor = 1.0 if is_signal_pattern else 2.0
     if rr < rr_floor:
         return True
-        
+
     return False
 
 

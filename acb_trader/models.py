@@ -160,6 +160,7 @@ class Setup:
     ema_coil_confirmed: bool
     expires: date
     notes: str
+    breakdown: object = field(default=None)  # ScoreBreakdown; object avoids circular import
 
 
 # ── SESSION LEVELS (live) ─────────────────────────────────────────────────────
@@ -260,3 +261,29 @@ class DiscardedSetup:
     reason: str
     discarded_at: datetime
     would_have_hit_t1: Optional[bool] = None   # Backtest review only
+    # Price levels — populated when reason == BELOW_MIN_SCORE so discard_analysis()
+    # can simulate whether T1 or stop would have been hit within the 3-bar window.
+    entry_price: float = 0.0
+    stop_price:  float = 0.0
+    target_1:    float = 0.0
+
+
+# ── WEEKLY REVIEW REPORT ──────────────────────────────────────────────────────
+
+@dataclass
+class WeeklyReviewReport:
+    week_start: date
+    week_end: date
+    total_trades: int
+    wins: int
+    losses: int
+    win_rate: float                     # 0.0–1.0
+    total_pips: float
+    total_r: float
+    best_trade: Optional[str]           # e.g. "EURUSD +3.2R"
+    worst_trade: Optional[str]          # e.g. "GBPUSD -1.0R"
+    pattern_breakdown: dict             # pattern → {trades, wins, total_r}
+    discards_would_have_hit: int        # discarded setups that would have reached T1
+    discards_total: int
+    weekly_pnl_pct: float               # (balance_friday - balance_monday) / balance_monday
+    generated_at: datetime

@@ -35,7 +35,7 @@ def has_ema_coil_htf(ohlcv_htf: pd.DataFrame, atr14: float) -> bool:
 
     # Last 3 bars sideways
     last3_range = float(ohlcv_htf["high"].iloc[-3:].max() - ohlcv_htf["low"].iloc[-3:].min())
-    coil_sideways = last3_range <= 1.0 * atr14
+    coil_sideways = last3_range <= 2.0 * atr14   # 2×ATR: bars overlapping but not expanding
     return coil_tight and coil_sideways
 
 

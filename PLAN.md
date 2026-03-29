@@ -22,6 +22,7 @@ but +4.28R single outlier carries ~84% of profit). Build statistical confidence 
    or is the hold-limit saving us from reversals?
 
 **Output to add to print_report:**
+
 ```
   Core Expectancy:   +0.XXR  (outliers >3R removed: N trades)
   FORCE_CLOSE:       N total  (N wins / N losses / N flat)
@@ -46,6 +47,7 @@ On daily bars, a close in the bottom/top 25% is very aggressive — most valid r
 the 25–35% zone.
 
 **Revised change:**
+
 - Relax close-position gate from 25% → 33% (top/bottom third of the day's range)
 - Keep compression threshold at 0.70×ATR14 (do not change)
 
@@ -82,6 +84,7 @@ and `backtest_results.csv` contains INSIDE_FALSE_BREAK rows.
 ### Part A — Level proximity hardcode (implement now)
 
 The PARA detector has its own proximity check hardcoded at 25 pips:
+
 ```python
 # Line 367 — never updated when ANCHOR_CONFLUENCE_PIPS was changed to 50:
 if level > 0 and abs(last_close - level) <= 25 * pip:
@@ -93,6 +96,7 @@ as streak failures — the level proximity check runs first, so candidates that 
 proximity never reach the streak check at all.
 
 **Change:** Import and use `ANCHOR_CONFLUENCE_PIPS` instead of hardcoded `25`:
+
 ```python
 from acb_trader.config import ANCHOR_CONFLUENCE_PIPS
 # ...
@@ -123,6 +127,7 @@ floor logic scattered in the master detector. Bad precedent.
 ### Step 1: Run diagnostic backtest at MIN_SETUP_SCORE = 6 globally
 
 Temporarily lower `MIN_SETUP_SCORE = 6` in `config.py`, run the backtest, then in the results CSV:
+
 - Filter to `pattern == FIRST_GREEN_DAY AND score == 6`
 - Measure win rate and avg R on that subset *only*
 
@@ -136,13 +141,16 @@ Do not evaluate the overall results — just the score-6 FGD trades in isolation
 | Win rate < 40% OR avg R ≤ 0 | Keep floor at 7; close the question |
 
 If approved: implement as a `pattern_min_score` dict in `config.py`:
+
 ```python
 PATTERN_MIN_SCORE = {
     "FIRST_GREEN_DAY": 6,
     "DEFAULT": 7,  # MIN_SETUP_SCORE for all other patterns
 }
 ```
+
 Then in `detect_setups()`:
+
 ```python
 min_score = PATTERN_MIN_SCORE.get(setup.pattern, PATTERN_MIN_SCORE["DEFAULT"])
 if setup.score < min_score:
@@ -180,6 +188,7 @@ if setup.score < min_score:
 | Core expectancy | +0.05R (EURUSD +4.3R outlier stripped) |
 
 **Pattern breakdown:**
+
 - FGD: 32 trades, 50% WR, +5.53R net ← up from 25 trades (FGD +2 bonus confirmed working)
 - MFB: ~17 trades, 47% WR (unchanged)
 - FRD: ~8 trades, 37% WR (unchanged)
@@ -228,6 +237,7 @@ PARA: 4 trades, 25% WR, -2.91R net. Streak relaxation rejected. Proximity fix ap
 is stamped ⚠️ MONITOR ONLY — do not trade in Telegram.
 
 **Implementation:**
+
 - `config.py`: `MONITOR_ONLY_PATTERNS = {"PARABOLIC_REVERSAL"}`
 - `telegram.py`: `send_eod_briefing()` and `send_setup_armed()` check this set and append warning block
 

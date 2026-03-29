@@ -666,7 +666,17 @@ class DiscardedSetup:
                         # "NEWS_BLOCKED" | "TWO_SIDED_EXIT" | "TEMPLATE_CONFLICT" |
                         # "IN_PROGRESS_CANDLE" | "NOT_ON_WATCHLIST" | "MONTHLY_FRONTSIDE_ONLY" |
                         # "EMA_COIL_NOT_CONFIRMED" | "BELOW_HCOM_LCOM_REQUIRED" |
-                        # "ENTRY_DATE_EXPIRED" | "MONDAY_FALSE_BREAK_NO_FRD"
+                        # "ENTRY_DATE_EXPIRED" | "MONDAY_FALSE_BREAK_NO_FRD" |
+                        # ── Pattern quality filters (added 2026-03-28 PDF audit) ──
+                        # "FRD_FGD_WRONG_DOW"          FRD/FGD not on Wed or Thu
+                        # "FRD_FGD_TREND_TOO_SMALL"    Net trend leg < 2.0 × ATR14
+                        # "FRD_TREND_WEAK_CLOSE"        Trend bar didn't close in upper 40%
+                        # "FGD_TREND_WEAK_CLOSE"        Trend bar didn't close in lower 40%
+                        # "PCD_PUMP_DAY_LIMP"           A pump day range < 0.75 × ATR14
+                        # "PCD_PUMP_NO_DISPLACEMENT"    Net pump displacement < 1.5 × ATR14
+                        # "PCD_PUMP_STILL_IN_PROGRESS"  Coil day made new 5-day high/low
+                        # "LHF_WEAK_PRIOR_CLOSE"        Prior explosive bar closed in middle 60%
+                        # "MONITOR_ONLY_PATTERN"        Pattern in MONITOR_ONLY_PATTERNS set
     discarded_at: datetime
     would_have_hit_t1: bool | None   # Populated during backtesting review only
 ```
@@ -1388,9 +1398,21 @@ def get_max_stop(pair: str) -> tuple[int, int]:
 
 ---
 
-## EMA Coil Confirmation (All Patterns — Optional but High Value)
+## EMA Coil Confirmation (All Patterns — Mandatory except HOD/LOD Reversals)
 
-The EMA Coil is a secondary confirmation that all time frames are aligned at the entry level. When present it upgrades any setup to near-maximum conviction. Check AFTER a setup is detected.
+The EMA Coil is the confirmation that **all time frames are aligned** at the entry level.
+Burke (ACB Manual p.40): *"These SETUPS should ALL BE COILED into Higher Time Frame EMAs.
+The EXCEPTIONS will be a HIGH OF DAY or LOW OF DAY REVERSAL at an EXTREME."*
+
+In practice: the coil is near-mandatory. The HOD/LOD exception covers live intraday PARA
+setups only — not EOD daily-bar signals. When present it upgrades any setup to near-maximum
+conviction and sets `trade_type = FIVE_STAR_SCALABLE` regardless of score.
+
+**Config:** `EMA_COIL_PERIODS = [8, 21, 55, 100, 200]` — all five periods required.
+Minimum bars for 200-EMA warmup: 205 daily bars (~41 weeks).
+The 200 EMA is the highest time frame anchor — its convergence is "all TFs aligned."
+
+Check AFTER a setup is detected.
 
 ```python
 def has_ema_coil(ohlcv_htf: pd.DataFrame, ema_periods: list[int] = [8, 21, 55, 100, 200]) -> bool:
@@ -1542,6 +1564,17 @@ An inside day (range fully contained within prior day) followed by a breakout in
 ---
 
 ## Pattern 4: Parabolic Reversal at Structural Level
+
+> **⚠️ MONITOR ONLY (as of 2026-03-28)**
+> Backtest 2023-2024: 4 trades, 25% WR, -2.91R net. This pattern is architecturally
+> constrained on an EOD daily-bar system — true PARA requires 15-min intraday false-break
+> detection within the equity hour window. The EOD proximity proxy is insufficient.
+> Pattern fires and scores normally but is blocked from execution via `MONITOR_ONLY_PATTERNS`.
+> Re-evaluate after 20+ live signal observations, or when intraday data feed is integrated.
+>
+> **Note from ACB Manual p.40:** *"The EXCEPTIONS [to EMA coil requirement] will be a HIGH OF
+> DAY or LOW OF DAY REVERSAL at an EXTREME."* PARA is the documented coil-free exception —
+> but this only applies to live intraday execution at the exact HOD/LOD level, not an EOD proxy.
 
 ### Conceptual Logic
 
@@ -1751,9 +1784,9 @@ When multiple setups trigger across the basket on the same day, rank by score an
 | Setup is against a 5-day trend (backside only) | +1 |
 | **Maximum score** | **12** |
 
-**Minimum score to fire:** 5  
-**"Load the boat" threshold:** Score ≥ 9 → scale to full position size  
-**"Nail and bail" threshold:** Score 5–8 → half position, Target 1 only, no trailer  
+**Minimum score to fire:** 7 *(optimizer sweep 2026-03-28 confirmed: score=6 → +0.01R, score=7 → +0.10R)*
+**"Load the boat" threshold:** Score ≥ 9 → scale to full position size (5-STAR SCALABLE)
+**"Nail and bail" threshold:** Score 7–8 → half position, Target 1 only, no trailer (SESSION_TRADE)  
 
 ---
 
@@ -1763,11 +1796,13 @@ When multiple setups trigger across the basket on the same day, rank by score an
 - Setup triggers on a Friday
 - Stop distance > 1.25 × ATR14
 - Market state = RANGING
-- Score < 5
+- Score < 7 *(optimizer-confirmed floor — see §Scoring)*
 - Same pair triggered a setup in the last 2 trading days (cooldown period)
 - Today is NOT the entry_date (signal_date + 1) — setups don't carry past Day N+1
 - EMA Coil did not confirm during the session (entry_date expired without coil)
 - Major scheduled news event within 4 hours of entry (check economic calendar)
+- FRD/FGD signal date is not Wednesday or Thursday (`FRD_FGD_WRONG_DOW`)
+- Pattern is in `MONITOR_ONLY_PATTERNS` — fires and scores but execution blocked
 
 ---
 
@@ -2054,6 +2089,15 @@ def get_monthly_phase(days_into_month: int) -> str:
 ---
 
 ## 3HC / 3LC Countdown (1-2-Signal Day)
+
+Burke (ACB Manual p.40) defines exactly three valid variations of the setup trigger:
+
+> **1)** 3HC or 3LC **BREAKING OUT** of a monthly range (CIB beyond prior month high/low)
+> **2)** 3HC or 3LC **INSIDE** a monthly range with a First Red/Green Day at HCOM/LCOM
+> **3)** A market that **CLOSES IN BREAKOUT AS the HCOM or LCOM** itself
+
+All three fire `signal_ready = True` in the countdown. Once triggered, the NEXT day's
+session should coil into the close level — that coil breakdown IS the entry.
 
 Once a CIB is detected on the watchlist, the system begins a countdown tracking consecutive higher/lower closes toward the signal day.
 

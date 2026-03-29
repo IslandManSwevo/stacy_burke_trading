@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "mcp__Claude_Preview__preview_start",
-      "Bash(python -X utf8 -m acb_trader.backtest.run_backtest)"
+      "Bash(python -X utf8 -m acb_trader.backtest.run_backtest)",
+      "Bash(dir \"C:\\\\Users\\\\green\\\\stacy_burke_trading\" /b)",
+      "Read(//c/Users/green/Downloads/**)",
+      "Bash(python3:*)",
+      "Bash(ls -lh \"/c/Users/green/Downloads/files \\(8\\).zip\")",
+      "Bash(python -c \":*)"
     ]
   }
 }

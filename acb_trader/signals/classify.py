@@ -124,10 +124,10 @@ def classify_market_state(
         # (The old "outside close" requirement was far stricter than the Burke playbook.)
         frd = (last_close < float(last_row["open"]) and
                last_close < float(prev_row["close"]) and
-               prior_streak >= 2)
+               prior_streak >= 3)
         fgd = (last_close > float(last_row["open"]) and
                last_close > float(prev_row["close"]) and
-               prior_streak <= -2)
+               prior_streak <= -3)
 
         if is_inside:
             substate = "INSIDE_DAY"

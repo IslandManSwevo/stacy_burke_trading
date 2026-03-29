@@ -9,7 +9,7 @@ import os
 import requests
 from datetime import datetime
 from acb_trader.config import ET, MONITOR_ONLY_PATTERNS
-from acb_trader.db.models import Setup, TradeRecord, SystemHealthResult, WeeklyTemplate
+from acb_trader.db.models import Setup, TradeRecord, SystemHealthResult, WeeklyTemplate, WeeklyReviewReport
 
 
 def _send(text: str) -> bool:
@@ -117,4 +117,59 @@ def send_health_warnings(result: SystemHealthResult) -> bool:
         lines.append(f"  ❌ {f}")
     for w in result.warnings:
         lines.append(f"  ⚠️ {w}")
+    return _send("\n".join(lines))
+
+
+def send_weekly_review(report: WeeklyReviewReport) -> bool:
+    """
+    Friday end-of-week review sent to Telegram.
+    Covers P&L, win rate, per-pattern breakdown, best/worst trade,
+    and a hindsight look at discarded setups.
+    """
+    outcome   = "✅" if report.total_r >= 0 else "❌"
+    pnl_str   = f"{report.weekly_pnl_pct:+.2%}" if report.weekly_pnl_pct else "N/A"
+    week_label = (
+        f"{report.week_start.strftime('%d %b')} – "
+        f"{report.week_end.strftime('%d %b %Y')}"
+    )
+
+    lines = [
+        f"📅 <b>WEEKLY REVIEW</b> — {week_label}\n",
+        (
+            f"📊 <b>P&amp;L:</b> {outcome} {report.total_r:+.2f}R "
+            f"| {report.total_pips:+.1f} pips | Account: {pnl_str}"
+        ),
+        f"🎯 <b>Win Rate:</b> {report.wins}/{report.total_trades}"
+        + (f" ({report.win_rate:.0%})" if report.total_trades else ""),
+    ]
+
+    if report.pattern_breakdown:
+        lines.append("\n🔍 <b>Pattern Breakdown:</b>")
+        for pattern, stats in sorted(
+            report.pattern_breakdown.items(),
+            key=lambda kv: kv[1]["total_r"],
+            reverse=True,
+        ):
+            wr = stats["wins"] / stats["trades"] if stats["trades"] else 0.0
+            lines.append(
+                f"   {pattern}: {stats['trades']}T "
+                f"| {wr:.0%} WR "
+                f"| {stats['total_r']:+.2f}R"
+            )
+
+    if report.best_trade:
+        lines.append(f"\n🏆 <b>Best:</b>  {report.best_trade}")
+    if report.worst_trade:
+        lines.append(f"💀 <b>Worst:</b> {report.worst_trade}")
+
+    if report.discards_total > 0:
+        lines.append(
+            f"\n🗑 <b>Discards Hindsight:</b> "
+            f"{report.discards_would_have_hit}/{report.discards_total} "
+            f"would have hit T1"
+        )
+
+    if report.total_trades == 0:
+        lines.append("\n⏸ <b>No trades taken this week</b> — sat on hands")
+
     return _send("\n".join(lines))
