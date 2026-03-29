@@ -13,7 +13,7 @@ import os
 from datetime import datetime, timedelta, date
 from typing import Optional
 
-from acb_trader.config import ET
+from acb_trader.config import ET, NEWS_SETTLE_MINUTES
 from acb_trader.data.feed import BrokerFeed
 from acb_trader.data.levels import (
     snap_to_quarter, snap_stop_beyond, get_pip_size, price_to_pips,
@@ -22,9 +22,6 @@ from acb_trader.execution.coil import wait_for_ema_coil, check_5min_entry
 from acb_trader.execution.orders import OrderManager
 from acb_trader.db.models import Setup
 from acb_trader.signals.patterns import get_rr_floor
-
-# Settle window: wait this long after the last blocking event before scanning for coil
-NEWS_SETTLE_MINUTES = 30
 
 PAUSED_SETUPS_PATH = os.path.join(
     os.path.dirname(__file__), "..", "..", "paused_setups.json"
@@ -108,16 +105,20 @@ def check_paused_setups(feed: BrokerFeed, order_mgr: Optional[OrderManager] = No
             remaining.append(entry)
             continue
 
-        # Fetch 5-min bars and scan for EMA coil
+        # Fetch 15-min bars for coil detection, 5-min for entry trigger.
+        # Playbook mandate: the 30-min settle gives the 9/20/50 EMAs on the
+        # 15-minute chart time to organically converge back into a tight coil.
+        # The 5-min 20 EMA close-through is the separate execution trigger.
         try:
-            bars_5min = feed.get_5min_bars(pair, count=60)
+            bars_15min = feed.get_15min_bars(pair, count=48)
+            bars_5min  = feed.get_5min_bars(pair, count=60)
         except Exception as e:
             print(f"[news_rearm] {pair}: feed error — {e}")
             remaining.append(entry)
             continue
 
         prior_entry = float(entry.get("entry_price", 0.0))
-        coil = wait_for_ema_coil(pair, prior_entry, direction, bars_5min)
+        coil = wait_for_ema_coil(pair, prior_entry, direction, bars_15min)
 
         if not coil.triggered:
             print(f"[news_rearm] {pair} {pattern}: no coil yet — watching")

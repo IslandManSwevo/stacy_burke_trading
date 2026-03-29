@@ -9,7 +9,7 @@ import os
 import requests
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from acb_trader.config import ET, NEWS_BLOCK_WINDOW_HOURS
+from acb_trader.config import ET, NEWS_BLOCK_WINDOW_HOURS, NEWS_SETTLE_MINUTES
 
 
 @dataclass
@@ -94,3 +94,50 @@ def is_news_blocked(pair: str, session_open: datetime) -> bool:
     Block = 1hr before → 3hrs after session open.
     """
     return bool(get_blocking_events(pair, session_open))
+
+
+def _get_recent_high_impact(pair: str, now: datetime) -> list[NewsEvent]:
+    """
+    Fetch HIGH-impact events in the ±3 hour window around *now* that
+    affect this pair's currencies.  Used by the real-time settle guard.
+    """
+    currencies = get_currencies(pair)
+    window_start = now - timedelta(hours=3)
+    window_end   = now + timedelta(hours=3)
+    events = fetch_calendar(window_start, window_end, impact="HIGH")
+    return [e for e in events if e.currency in currencies]
+
+
+def news_settle_until(pair: str, now: datetime) -> datetime | None:
+    """
+    Return the earliest datetime at which the settle window is clear
+    for this pair, or *None* if no MRN event is active.
+
+    Logic: for every HIGH-impact event whose timestamp falls within
+    the last NEWS_SETTLE_MINUTES, compute event_ts + settle.  Return
+    the latest such boundary.
+    """
+    events = _get_recent_high_impact(pair, now)
+    if not events:
+        return None
+    latest_boundary = None
+    for e in events:
+        boundary = e.timestamp + timedelta(minutes=NEWS_SETTLE_MINUTES)
+        if boundary > now:  # still inside the settle window
+            if latest_boundary is None or boundary > latest_boundary:
+                latest_boundary = boundary
+    return latest_boundary
+
+
+def is_in_news_settle_window(pair: str, now: datetime | None = None) -> bool:
+    """
+    Real-time guard: returns True if *now* falls within 30 minutes
+    of a HIGH-impact news print for this pair.
+
+    Call this before ANY order placement or fill acceptance.  If True,
+    the algorithm MUST wait — entering during the spike is Garbage
+    Trading and will not pass the 100-Lot Litmus Test.
+    """
+    if now is None:
+        now = datetime.now(ET)
+    return news_settle_until(pair, now) is not None

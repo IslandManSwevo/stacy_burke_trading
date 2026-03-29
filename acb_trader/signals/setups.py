@@ -135,10 +135,13 @@ def _detect_pump_coil_dump(
     prev  = ohlcv.iloc[-2]
     coil  = ohlcv.iloc[-2]   # Day -1 = coil day
 
-    # Pump: ≥2 consecutive closes in same direction
+    # Pump: ≥3 consecutive closes in same direction (strict Three-Day Rule).
+    # Prior threshold of 2 was a compromise that stepped in front of the trend
+    # before the institutional trap was fully built. The 3-day cycle (Mon→Wed)
+    # ensures trapped breakout traders are committed before the coil forms.
     streak = abs(state.close_streak)
-    if streak < 2:
-        return None, ""   # No pump yet — skip silently
+    if streak < 3:
+        return None, ""   # Trap not built yet — wait for Day 3
 
     direction = "SHORT" if state.close_streak > 0 else "LONG"
 

@@ -6,6 +6,7 @@ All order ops go through this module. Never call MT5 directly from other modules
 from __future__ import annotations
 from datetime import datetime
 from acb_trader.config import ET
+from acb_trader.data.calendar import is_in_news_settle_window
 from acb_trader.db.models import Setup
 
 try:
@@ -29,7 +30,21 @@ class MT5Client:
         setup: Setup,
         lot_size: float,
     ) -> OrderResult:
-        """Place a limit entry order at setup.entry_price."""
+        """Place a limit entry order at setup.entry_price.
+
+        Hardcoded guardrail: REFUSES to place any order while the pair
+        is inside the 30-minute post-MRN settle window.  Entering during
+        the news spike is Garbage Trading — 50-100 pips of slippage will
+        bypass any protective stop.  The algorithm waits for the EMAs to
+        re-coil, then news_rearm.py places the order after the settle.
+        """
+        now = datetime.now(ET)
+        if is_in_news_settle_window(setup.pair, now):
+            msg = (f"BLOCKED: {setup.pair} is inside the 30-min post-MRN "
+                   f"settle window — order rejected to protect capital")
+            print(f"[orders] {msg}")
+            return OrderResult(False, message=msg)
+
         if not MT5_AVAILABLE:
             print(f"[orders] PAPER: LIMIT {setup.direction} {setup.pair} "
                   f"@ {setup.entry_price:.5f} SL={setup.stop_price:.5f} "

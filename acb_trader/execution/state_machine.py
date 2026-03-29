@@ -9,6 +9,7 @@ from datetime import datetime, date
 from acb_trader.config import ET, BREAKEVEN_PIPS, TRAIL_STEP_PIPS
 from acb_trader.db.models import Setup, TradeRecord, AccountState
 from acb_trader.data.levels import get_pip_size, price_to_pips
+from acb_trader.data.calendar import is_in_news_settle_window
 from acb_trader.execution.coil import is_two_sided
 
 # Terminal states
@@ -38,11 +39,19 @@ class ActiveTrade:
 
     # ── STATE TRANSITIONS ─────────────────────────────────────────────────────
 
-    def on_fill(self, fill_price: float, fill_time: datetime):
+    def on_fill(self, fill_price: float, fill_time: datetime) -> bool:
+        """Accept a fill.  Returns False (and stays PENDING) if the pair
+        is inside the 30-min post-MRN settle window — the fill must be
+        rejected or the pending order cancelled to avoid slippage."""
         assert self.state == "PENDING_ENTRY"
+        if is_in_news_settle_window(self.setup.pair, fill_time):
+            print(f"[state_machine] FILL BLOCKED: {self.setup.pair} inside "
+                  f"30-min MRN settle window at {fill_time} — staying PENDING")
+            return False
         self.state       = "ACTIVE"
         self.entry_price = fill_price
         self.entry_time  = fill_time
+        return True
 
     def on_target_1_hit(self, price: float, time: datetime) -> str | None:
         """Close Tranche A. Move stop to BE if FIVE_STAR."""

@@ -97,7 +97,16 @@ EOD_RUN_OFFSET_MIN   = 5       # Fire EOD run 5 min after NY close
 # The 3-period proxy [9,20,50] is practical for daily bars: fires when the
 # market is genuinely coiling on the daily timeframe.
 EMA_COIL_PERIODS     = [9, 20, 50]              # Daily-bar proxy (intraday uses full 5)
-EMA_COIL_TIGHT_MULT  = 0.3                  # Spread <= 0.3 x ATR14 = coil tight (tighter = more selective)
+
+# Timeframe-specific EMA coil thresholds (Spread <= MULT × ATR14):
+#   INTRADAY (15-min execution gate) — strict: traps volume, stalled sideways
+#     before London/NY open.  Wider than 0.5× on a 15-min chart = chop.
+#   DAILY ("professional boundary") — relaxed to 0.75×: daily compressions
+#     naturally land between 0.6–0.9× ATR.  Using 0.5× on daily bars blocks
+#     valid highly-engineered PCD coils; 0.75× admits them while still
+#     rejecting wide-body expansion bars.
+EMA_COIL_TIGHT_MULT  = 0.5                  # Intraday 15-min execution gate  (0.5 × ATR14)
+EMA_COIL_DAILY_MULT  = 0.75                 # EOD daily scanner "professional boundary" (0.75 × ATR14)
 COIL_SIDEWAYS_ATR_MULT = 2.0                # 2x ATR = bars overlapping but not expanding
 EMA_ENTRY_PERIOD     = 20                   # 20 EMA on 5-min chart = entry trigger
 COIL_SIDEWAYS_BARS   = 3                    # Min consecutive sideways 15-min bars
@@ -134,6 +143,15 @@ FIVE_STAR_TRANCHES       = {"A": 0.50, "B": 0.30, "C": 0.20}
 # ── NEWS SOURCE ──────────────────────────────────────────────────────────────
 FOREXFACTORY_CALENDAR_URL = "https://www.forexfactory.com/calendar"
 NEWS_BLOCK_WINDOW_HOURS   = 1               # Block 1 hour before + 3 hours after MRN
+NEWS_SETTLE_MINUTES      = 30              # Post-MRN settle: no entry within 30 min of news print
+
+# ── THREE-DAY RULE ───────────────────────────────────────────────────────────
+# Playbook §Three Higher/Lower Closes: "minimum 3 consecutive closes in same
+# direction" before a reversal signal (FRD/FGD) is valid.  Prior threshold of
+# 2 was a compromise that stepped in front of the trend before the trap was
+# built — guaranteed to chop equity.  This is the ONE constant that controls
+# the prerequisite everywhere: weekly countdown, watchlist, PCD, FRD/FGD.
+MIN_STREAK_DAYS          = 3               # Uncompromising 3-day structural minimum
 
 # Patterns that fire through detection & scoring but are flagged [MONITOR ONLY] in Telegram.
 # Single source of truth: acb_trader/signals/patterns.py (PatternDef.monitor_only=True).

@@ -7,7 +7,7 @@ from __future__ import annotations
 import pandas as pd
 from datetime import datetime, date
 from acb_trader.db.models import MarketState, WatchlistResult, WeeklyTemplate
-from acb_trader.config import ET
+from acb_trader.config import ET, MIN_STREAK_DAYS
 from acb_trader.data.levels import get_pip_size
 from typing import Optional
 
@@ -72,9 +72,9 @@ def evaluate_watchlist(
         if state.hom > prior_month_high or state.lom < prior_month_low:
             criteria.append("MONTHLY_LEVEL_BREAK")
 
-    # 6. 3HC/3LC Countdown (Day 2 or 3)
+    # 6. 3HC/3LC Countdown — strict 3-day minimum (Playbook §Three-Day Rule)
     if template and template.close_countdown:
-        if template.close_countdown.count >= 2:
+        if template.close_countdown.count >= MIN_STREAK_DAYS:
             criteria.append("COUNTDOWN_MATURITY")
 
     return WatchlistResult(

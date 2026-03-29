@@ -326,11 +326,10 @@ class BacktestEngine:
                     continue
 
                 # Daily EMA coil proxy — reuses has_ema_coil_htf() from execution/coil.py.
-                # Fires when all [9, 20, 50] EMAs converge (spread <= 0.5x ATR14) AND
-                # last 3 daily bars are sideways (range <= 1.0x ATR14). This matches the
-                # skill doc's has_ema_coil() definition applied to daily OHLCV bars.
-                # Resolves: PCD scoring gap, IFB scoring gap, FIVE_STAR tier never firing.
-                ema_coil = has_ema_coil_htf(df_slice, state.atr14)
+                # Fires when all [9, 20, 50] EMAs converge AND last 3 daily bars are sideways.
+                # timeframe="DAILY" applies the 0.75 × ATR14 professional-boundary multiplier;
+                # the tighter 0.5 × multiplier is reserved for the intraday 15-min execution gate.
+                ema_coil = has_ema_coil_htf(df_slice, state.atr14, timeframe="DAILY")
 
                 setups, discarded = detect_setups(
                     state=state,

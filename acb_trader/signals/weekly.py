@@ -7,7 +7,7 @@ from __future__ import annotations
 import pandas as pd
 from datetime import datetime, date, timedelta
 from typing import Optional
-from acb_trader.config import ET, MONTHLY_RESET_DAYS, MONTHLY_FRONTSIDE_DAYS, MIN_OPENING_RANGE_PIPS
+from acb_trader.config import ET, MONTHLY_RESET_DAYS, MONTHLY_FRONTSIDE_DAYS, MIN_OPENING_RANGE_PIPS, MIN_STREAK_DAYS
 from acb_trader.db.models import (
     WeeklyTemplate, WeeklyAnchors, OpeningRange, CloseCountdown, DayRole, WeeklyReviewReport
 )
@@ -230,7 +230,7 @@ def _compute_close_countdown(
         label=label,
         at_hcom_lcom=at_hcom or at_lcom,
         at_hom_lom=at_hom or at_lom,
-        signal_ready=count >= 2,
+        signal_ready=count >= MIN_STREAK_DAYS,   # Strict 3-day rule: never compromise to 2
     )
 
 

@@ -113,7 +113,7 @@ class CloseCountdown:
     label: str                  # "DAY_1" | "DAY_2" | "SIGNAL_DAY" | "NONE"
     at_hcom_lcom: bool
     at_hom_lom: bool
-    signal_ready: bool          # True when count >= 2
+    signal_ready: bool          # True when count >= 3 (strict 3-day rule)
 
 
 @dataclass

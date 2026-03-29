@@ -187,8 +187,11 @@ def run_eod(feed: BrokerFeed):
                 all_templates.append(template)
 
                 # EMA coil (higher time frame check)
+                # timeframe="DAILY" applies the 0.75 × ATR14 professional-boundary multiplier.
+                # The strict 0.5 × intraday multiplier is only used once the system arms
+                # and switches to 15-min monitoring for the 5-min 20 EMA entry trigger.
                 h4_ohlcv = feed.get_ohlcv(pair, "H4", count=50) if hasattr(feed, "get_ohlcv") else daily_ohlcv
-                ema_coil = has_ema_coil_htf(h4_ohlcv, state.atr14)
+                ema_coil = has_ema_coil_htf(h4_ohlcv, state.atr14, timeframe="DAILY")
 
                 # 15-min bars for FRD/FGD coil-stop calculation
                 m15_ohlcv = feed.get_15min_bars(pair, count=48)

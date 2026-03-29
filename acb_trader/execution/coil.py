@@ -8,7 +8,7 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 from acb_trader.config import (
-    EMA_COIL_PERIODS, EMA_COIL_TIGHT_MULT, EMA_ENTRY_PERIOD,
+    EMA_COIL_PERIODS, EMA_COIL_TIGHT_MULT, EMA_COIL_DAILY_MULT, EMA_ENTRY_PERIOD,
     COIL_SIDEWAYS_BARS, TWO_SIDED_PIPS, TWO_SIDED_CANDLES,
     COIL_SIDEWAYS_ATR_MULT
 )
@@ -22,17 +22,32 @@ def compute_ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
 
 
-def has_ema_coil_htf(ohlcv_htf: pd.DataFrame, atr14: float) -> bool:
+def has_ema_coil_htf(
+    ohlcv_htf: pd.DataFrame,
+    atr14: float,
+    timeframe: str = "INTRADAY",
+) -> bool:
     """
     Higher time frame EMA coil confirmation (daily / 4H).
     All EMAs converging at an extreme = ALL TIME FRAMES ALIGNED.
+
+    timeframe : str
+        "DAILY"   → applies the EOD professional-boundary multiplier (0.75 × ATR14).
+                    Daily compressions naturally sit between 0.6–0.9× ATR; the 0.75×
+                    threshold admits valid PCD coils while rejecting expansion bars.
+        "INTRADAY" → strict execution-gate multiplier (0.5 × ATR14).  On a 15-min
+                    chart anything wider = chop; do not take that trade.
     """
     if len(ohlcv_htf) < max(EMA_COIL_PERIODS) + 5:
         return False
+
+    # ── Select the correct ATR multiplier for the structural timeframe ──────
+    mult = EMA_COIL_DAILY_MULT if timeframe == "DAILY" else EMA_COIL_TIGHT_MULT
+
     closes = ohlcv_htf["close"]
     ema_vals = {p: float(compute_ema(closes, p).iloc[-1]) for p in EMA_COIL_PERIODS}
     spread = max(ema_vals.values()) - min(ema_vals.values())
-    coil_tight = spread <= EMA_COIL_TIGHT_MULT * atr14
+    coil_tight = spread <= mult * atr14
 
     # Last 3 bars sideways
     last3_range = float(ohlcv_htf["high"].iloc[-3:].max() - ohlcv_htf["low"].iloc[-3:].min())
