@@ -129,7 +129,6 @@ def score_setup(
 
     # Resolve signal date day-of-week
     if isinstance(setup.signal_date, str):
-        from datetime import datetime
         sig_date = datetime.strptime(setup.signal_date, "%Y-%m-%d").date()
     else:
         sig_date = setup.signal_date
@@ -174,7 +173,7 @@ def score_setup(
 
     # ── Minor bonuses ─────────────────────────────────────────────────────────
 
-    if template.anchors.monthly_phase == "BACKSIDE":
+    if template.monthly_phase == "BACKSIDE":
         bd.backside_phase = 1
 
     if template.close_countdown.label == "SIGNAL_DAY":

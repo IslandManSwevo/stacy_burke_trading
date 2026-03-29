@@ -246,7 +246,7 @@ def _confidence(template_type: str, close_streak: int, countdown: CloseCountdown
 
 # ── WEEKLY REVIEW ────────────────────────────────────────────────────────────
 
-def build_weekly_review(monday: date, weekly_pnl_pct: float = 0.0) -> WeeklyReviewReport:
+def build_weekly_review(monday: date, weekly_dd_pct: float = 0.0) -> WeeklyReviewReport:
     """
     Aggregate completed trades and discards for the Mon–Fri window starting at
     *monday* into a WeeklyReviewReport.  Called by run_weekly_review() in main.py
@@ -255,7 +255,7 @@ def build_weekly_review(monday: date, weekly_pnl_pct: float = 0.0) -> WeeklyRevi
     Parameters
     ----------
     monday          : date — Monday of the week to aggregate (auto-computed in main.py)
-    weekly_pnl_pct  : float — (balance_friday - balance_monday) / balance_monday,
+    weekly_dd_pct  : float — (balance_friday - balance_monday) / balance_monday,
                       fetched from session_tracker in the caller.
     """
     from acb_trader.db.session_tracker import get_week_trades, get_week_discards
@@ -272,10 +272,17 @@ def build_weekly_review(monday: date, weekly_pnl_pct: float = 0.0) -> WeeklyRevi
     total_pips = sum(float(t.get("pips", 0)) for t in trades)
     total_r    = sum(float(t.get("r_multiple", 0)) for t in trades)
 
-    best  = max(trades, key=lambda t: float(t.get("r_multiple", 0)), default=None)
-    worst = min(trades, key=lambda t: float(t.get("r_multiple", 0)), default=None)
-    best_str  = f"{best['pair']} {float(best['r_multiple']):+.2f}R"  if best  else None
-    worst_str = f"{worst['pair']} {float(worst['r_multiple']):+.2f}R" if worst else None
+    def _safe_r(t_dict):
+        try:
+            return float(t_dict.get("r_multiple", 0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    best  = max(trades, key=_safe_r, default=None)
+    worst = min(trades, key=_safe_r, default=None)
+
+    best_str  = f"{best.get('pair', '<unknown>')} {_safe_r(best):+.2f}R"  if best  else None
+    worst_str = f"{worst.get('pair', '<unknown>')} {_safe_r(worst):+.2f}R" if worst else None
 
     # Per-pattern breakdown
     breakdown: dict = {}
@@ -309,6 +316,6 @@ def build_weekly_review(monday: date, weekly_pnl_pct: float = 0.0) -> WeeklyRevi
         pattern_breakdown=breakdown,
         discards_would_have_hit=discards_hit,
         discards_total=len(discards),
-        weekly_pnl_pct=weekly_pnl_pct,
+        weekly_dd_pct=weekly_dd_pct,
         generated_at=datetime.now(ET),
     )

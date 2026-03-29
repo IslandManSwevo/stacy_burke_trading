@@ -226,15 +226,15 @@ def run_weekly_review(feed: BrokerFeed):
 
     monday = now.date() - timedelta(days=now.weekday())  # ISO Monday of current week
 
-    # Weekly P&L from session_tracker (set on Monday morning, compared to now)
-    weekly_pnl_pct = 0.0
+    # Weekly DD from session_tracker (set on Monday morning, compared to now)
+    weekly_dd_pct = 0.0
     try:
         acc = feed.get_account()
-        _, weekly_pnl_pct, _ = compute_account_metrics(acc["balance"])
+        _, weekly_dd_pct, _ = compute_account_metrics(acc["balance"])
     except Exception as e:
         print(f"[weekly_review] Could not fetch account metrics: {e}")
 
-    report = build_weekly_review(monday, weekly_pnl_pct)
+    report = build_weekly_review(monday, weekly_dd_pct)
     send_weekly_review(report)
 
     print(

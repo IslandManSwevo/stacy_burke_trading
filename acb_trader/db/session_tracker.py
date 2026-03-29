@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import logging
 from datetime import datetime, date, timedelta
 from typing import TYPE_CHECKING
@@ -40,6 +41,38 @@ if TYPE_CHECKING:
 _SESSION_FILE  = os.path.join(os.path.dirname(__file__), "session_state.json")
 _TRADE_LOG     = os.path.join(os.path.dirname(__file__), "trade_log.jsonl")
 _DISCARD_LOG   = os.path.join(os.path.dirname(__file__), "discard_log.jsonl")
+
+
+def _lock_file(f, exclusive: bool = True) -> None:
+    """Acquire a cross-platform file lock."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            pos = f.tell()
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+            f.seek(pos)
+        else:
+            import fcntl
+            flags = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            fcntl.flock(f.fileno(), flags)
+    except Exception as e:
+        logger.warning(f"File lock warn: {e}")
+
+def _unlock_file(f) -> None:
+    """Release a cross-platform file lock."""
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            pos = f.tell()
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            f.seek(pos)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
 
 
 # ── LOW-LEVEL I/O ─────────────────────────────────────────────────────────────
@@ -206,7 +239,11 @@ def log_trade(record: "TradeRecord") -> None:
     }
     try:
         with open(_TRADE_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+            _lock_file(f, exclusive=True)
+            try:
+                f.write(json.dumps(row) + "\n")
+            finally:
+                _unlock_file(f)
     except Exception as e:
         logger.error(f"Failed to log trade {record.trade_id} to {_TRADE_LOG}: {e}", exc_info=True)
 
@@ -230,7 +267,11 @@ def log_discard(discard: "DiscardedSetup") -> None:
     }
     try:
         with open(_DISCARD_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+            _lock_file(f, exclusive=True)
+            try:
+                f.write(json.dumps(row) + "\n")
+            finally:
+                _unlock_file(f)
     except Exception as e:
         logger.error(f"Failed to log discard for {discard.pair} to {_DISCARD_LOG}: {e}", exc_info=True)
 
@@ -246,18 +287,22 @@ def get_week_trades(monday: date) -> list:
     if not os.path.exists(_TRADE_LOG):
         return results
     with open(_TRADE_LOG, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-                entry_date = _parse_dt(d.get("entry_time", "")).date()
-                if monday <= entry_date <= friday:
-                    results.append(d)
-            except Exception as e:
-                logger.warning(f"Error parsing trade log line: {e} | Line: {line}")
-                continue
+        _lock_file(f, exclusive=False)
+        try:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    entry_date = _parse_dt(d.get("entry_time", "")).date()
+                    if monday <= entry_date <= friday:
+                        results.append(d)
+                except Exception as e:
+                    logger.warning(f"Error parsing trade log line: {e} | Line: {line}")
+                    continue
+        finally:
+            _unlock_file(f)
     return results
 
 
@@ -271,16 +316,20 @@ def get_week_discards(monday: date) -> list:
     if not os.path.exists(_DISCARD_LOG):
         return results
     with open(_DISCARD_LOG, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                d = json.loads(line)
-                disc_date = _parse_dt(d.get("discarded_at", "")).date()
-                if monday <= disc_date <= friday:
-                    results.append(d)
-            except Exception as e:
-                logger.warning(f"Error parsing discard log line: {e} | Line: {line}")
-                continue
+        _lock_file(f, exclusive=False)
+        try:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    disc_date = _parse_dt(d.get("discarded_at", "")).date()
+                    if monday <= disc_date <= friday:
+                        results.append(d)
+                except Exception as e:
+                    logger.warning(f"Error parsing discard log line: {e} | Line: {line}")
+                    continue
+        finally:
+            _unlock_file(f)
     return results

@@ -11,7 +11,7 @@ ET = ZoneInfo("America/New_York")
 # ── RISK ──────────────────────────────────────────────────────────────────────
 RISK_PER_TRADE_PCT   = 0.01    # 1% account risk per trade
 MIN_TARGET_PIPS      = 50      # Minimum distance to Target 1 (all instruments)
-FIVE_STAR_SCORE      = 9       # Score threshold for FIVE_STAR_SCALABLE tier
+FIVE_STAR_SCORE      = 99      # Disabled: FIVE_STAR hurts at WR<46%. All trades SESSION_TRADE.
 MIN_SETUP_SCORE      = 7       # Optimizer-confirmed optimal threshold
 ATR_PERIOD           = 14
 
@@ -97,7 +97,8 @@ EOD_RUN_OFFSET_MIN   = 5       # Fire EOD run 5 min after NY close
 # The 3-period proxy [9,20,50] is practical for daily bars: fires when the
 # market is genuinely coiling on the daily timeframe.
 EMA_COIL_PERIODS     = [9, 20, 50]              # Daily-bar proxy (intraday uses full 5)
-EMA_COIL_TIGHT_MULT  = 0.3                  # Spread ≤ 0.3 × ATR14 = coil tight (tighter = more selective)
+EMA_COIL_TIGHT_MULT  = 0.3                  # Spread <= 0.3 x ATR14 = coil tight (tighter = more selective)
+COIL_SIDEWAYS_ATR_MULT = 2.0                # 2x ATR = bars overlapping but not expanding
 EMA_ENTRY_PERIOD     = 20                   # 20 EMA on 5-min chart = entry trigger
 COIL_SIDEWAYS_BARS   = 3                    # Min consecutive sideways 15-min bars
 TWO_SIDED_PIPS       = 15                   # ACB failure threshold post-entry
@@ -109,6 +110,10 @@ WEEKLY_DD_HALT_PCT   = 0.05
 CONSEC_LOSS_HALT     = 3
 BREAKEVEN_PIPS       = 30                   # Pips profit before moving stop to BE
 TRAIL_STEP_PIPS      = 20                   # Tranche C trail: step size in pips
+
+# ── BACKTEST TRANSACTION COSTS ──────────────────────────────────────────────
+BACKTEST_HALF_SPREAD_PIPS = 1.5             # Half-spread per fill (entry + exit)
+BACKTEST_SLIPPAGE_PIPS    = 0.5             # Execution slippage per fill
 
 # ── OPENING RANGE ────────────────────────────────────────────────────────────
 MIN_OPENING_RANGE_PIPS = 40                 # Mon+Tue range < 40 pips = dead week

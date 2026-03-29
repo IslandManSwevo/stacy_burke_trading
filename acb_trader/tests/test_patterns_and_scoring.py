@@ -22,11 +22,11 @@ from acb_trader.signals.patterns import (
 
 class TestPatternLibrary:
 
-    def test_all_six_patterns_registered(self):
+    def test_all_patterns_registered(self):
         expected = {
             "PUMP_COIL_DUMP", "FIRST_RED_DAY", "FIRST_GREEN_DAY",
             "INSIDE_FALSE_BREAK", "PARABOLIC_REVERSAL",
-            "MONDAY_FALSE_BREAK", "LOW_HANGING_FRUIT",
+            "MONDAY_FALSE_BREAK", "LOW_HANGING_FRUIT", "IB_EXTREME",
         }
         assert expected == ALL_PATTERN_NAMES
 
@@ -34,9 +34,10 @@ class TestPatternLibrary:
         assert get_score_bonus("FIRST_RED_DAY") == 2
         assert get_score_bonus("FIRST_GREEN_DAY") == 2
 
-    def test_frd_fgd_rr_floor_relaxed(self):
-        assert get_rr_floor("FIRST_RED_DAY") == 1.0
-        assert get_rr_floor("FIRST_GREEN_DAY") == 1.0
+    def test_frd_fgd_rr_floor_is_two_to_one(self):
+        # Restored from 1:1 — 1:1 compromise produced low-quality entries
+        assert get_rr_floor("FIRST_RED_DAY") == 2.0
+        assert get_rr_floor("FIRST_GREEN_DAY") == 2.0
 
     def test_lhf_score_bonus_is_1(self):
         assert get_score_bonus("LOW_HANGING_FRUIT") == 1

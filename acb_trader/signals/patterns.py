@@ -37,6 +37,7 @@ class PatternDef:
     min_score:    int        # quality gate; usually 7, may differ per pattern
     trade_type:   str        # "SESSION_TRADE" | "FIVE_STAR_SCALABLE"
     monitor_only: bool       # True → alert fires, no execution
+    is_signal:    bool       # True for signal-day setups (no anchor confluence required)
     description:  str        # short human label
 
 
@@ -50,24 +51,27 @@ _DEFS: list[PatternDef] = [
         min_score=7,
         trade_type="FIVE_STAR_SCALABLE",
         monitor_only=True,      # D1 displacement threshold unreachable; needs live data sample
+        is_signal=True,
         description="3HC/3LC close streak → coil → explosive breakdown/breakout",
     ),
     PatternDef(
         name="FIRST_RED_DAY",
         score_bonus=2,          # +2 per skill doc "First Red/Green Day"
-        rr_floor=1.0,           # relaxed from 2:1 — FRD/FGD targets often produce 1–1.5R
+        rr_floor=2.0,           # restored to 2:1 — 1:1 produced low-quality entries (methodology review)
         min_score=7,
         trade_type="SESSION_TRADE",
         monitor_only=False,
+        is_signal=True,
         description="First daily close against an established up-trend",
     ),
     PatternDef(
         name="FIRST_GREEN_DAY",
         score_bonus=2,          # mirrors FRD — skill doc applies to both
-        rr_floor=1.0,
+        rr_floor=2.0,           # restored to 2:1 — mirrors FRD correction
         min_score=7,
         trade_type="SESSION_TRADE",
         monitor_only=False,
+        is_signal=True,
         description="First daily close against an established down-trend",
     ),
     PatternDef(
@@ -77,6 +81,7 @@ _DEFS: list[PatternDef] = [
         min_score=7,
         trade_type="SESSION_TRADE",
         monitor_only=False,
+        is_signal=True,
         description="Inside day whose range is broken, then price snaps back inside",
     ),
     PatternDef(
@@ -86,6 +91,7 @@ _DEFS: list[PatternDef] = [
         min_score=7,
         trade_type="SESSION_TRADE",
         monitor_only=True,      # 4 trades, 25% WR, -2.91R — MONITOR ONLY pending more data
+        is_signal=False,        # Requires structural/anchor proximity
         description="Parabolic push into HCOW/LCOW structural level → false-break reversal",
     ),
     PatternDef(
@@ -95,6 +101,7 @@ _DEFS: list[PatternDef] = [
         min_score=7,
         trade_type="SESSION_TRADE",
         monitor_only=False,
+        is_signal=True,
         description="Monday sweeps HOW or LOW and fails; fade the false break Tue–Thu",
     ),
     PatternDef(
@@ -104,7 +111,18 @@ _DEFS: list[PatternDef] = [
         min_score=7,
         trade_type="SESSION_TRADE",
         monitor_only=False,
+        is_signal=True,
         description="Explosive prior-session move → 50% pullback continuation entry",
+    ),
+    PatternDef(
+        name="IB_EXTREME",
+        score_bonus=1,          # +1 structural (backside test of Mon-Tue IB)
+        rr_floor=1.5,          # T1 = OR midpoint (50% of Mon-Tue range) — achievable
+        min_score=7,
+        trade_type="SESSION_TRADE",
+        monitor_only=False,
+        is_signal=True,
+        description="Wed–Fri backside test of Mon-Tue IB extreme → fade the false break",
     ),
 ]
 
@@ -139,3 +157,8 @@ def get_min_score(pattern_name: str) -> int:
 def is_monitor_only(pattern_name: str) -> bool:
     """True if this pattern should alert but not execute."""
     return PATTERN[pattern_name].monitor_only if pattern_name in PATTERN else False
+
+
+def is_signal(pattern_name: str) -> bool:
+    """True if this is a signal-day pattern that does NOT require anchor confluence."""
+    return PATTERN[pattern_name].is_signal if pattern_name in PATTERN else False

@@ -127,7 +127,7 @@ def send_weekly_review(report: WeeklyReviewReport) -> bool:
     and a hindsight look at discarded setups.
     """
     outcome   = "✅" if report.total_r >= 0 else "❌"
-    pnl_str   = f"{report.weekly_pnl_pct:+.2%}" if report.weekly_pnl_pct else "N/A"
+    pnl_str   = f"{report.weekly_dd_pct:+.2%}" if report.weekly_dd_pct is not None else "N/A"
     week_label = (
         f"{report.week_start.strftime('%d %b')} – "
         f"{report.week_end.strftime('%d %b %Y')}"

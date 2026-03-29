@@ -23,6 +23,7 @@ from acb_trader.config import (
     FIVE_STAR_SCORE, MIN_TARGET_PIPS, MAX_STOP_PIPS, INSTRUMENT_CLASS,
     WEEKLY_DD_HALT_PCT, FIVE_STAR_TRANCHES, SESSION_TRADE_TRANCHES, TRAIL_STEP_PIPS,
     MONITOR_ONLY_PATTERNS,
+    BACKTEST_HALF_SPREAD_PIPS, BACKTEST_SLIPPAGE_PIPS,
 )
 # NOTE: MIN_SETUP_SCORE is intentionally NOT imported here.
 # The floor check lives in setups.py via cfg.MIN_SETUP_SCORE (dynamic module access),
@@ -394,29 +395,33 @@ class BacktestEngine:
         bar = bar.iloc[0]
         pair = bt.setup.pair
 
+        # Transaction cost: half-spread + slippage, applied against the trader
+        pip_size = get_pip_size(pair)
+        txn_cost = (BACKTEST_HALF_SPREAD_PIPS + BACKTEST_SLIPPAGE_PIPS) * pip_size
+
         # Limit order simulation: fills if price trades through entry_price
         entry = bt.setup.entry_price
         if bt.setup.direction == "SHORT":
             # Short limit: fills if today's high reaches entry
             if float(bar["high"]) >= entry:
-                bt.entry_price = entry
+                bt.entry_price = entry - txn_cost  # worse fill for short
                 bt.terminal_state = "ACTIVE"
                 return True
         else:
             # Long limit: fills if today's low reaches entry
             if float(bar["low"]) <= entry:
-                bt.entry_price = entry
+                bt.entry_price = entry + txn_cost  # worse fill for long
                 bt.terminal_state = "ACTIVE"
                 return True
 
         # Stop entry simulation: fills if price breaks through entry
         # (fallback: use open as fill if it gaps through entry)
         if bt.setup.direction == "SHORT" and float(bar["open"]) <= entry:
-            bt.entry_price = float(bar["open"])
+            bt.entry_price = float(bar["open"]) - txn_cost
             bt.terminal_state = "ACTIVE"
             return True
         if bt.setup.direction == "LONG" and float(bar["open"]) >= entry:
-            bt.entry_price = float(bar["open"])
+            bt.entry_price = float(bar["open"]) + txn_cost
             bt.terminal_state = "ACTIVE"
             return True
 
@@ -452,14 +457,22 @@ class BacktestEngine:
         # Current stops/targets
         if bt.stop_current == 0:
             bt.stop_current = bt.setup.stop_price
-            
+
         t1 = bt.setup.target_1
         t2 = bt.setup.target_2
-        
+
+        # Exit transaction cost (spread + slippage against the trader)
+        exit_txn = (BACKTEST_HALF_SPREAD_PIPS + BACKTEST_SLIPPAGE_PIPS) * pip_size
+
         # Tranche config
         tranche_map = FIVE_STAR_TRANCHES if bt.setup.trade_type == "FIVE_STAR_SCALABLE" else SESSION_TRADE_TRANCHES
-        
+
         def close_tranche(label: str, price: float):
+            # Apply exit transaction cost against the trader
+            if direction == "SHORT":
+                price = price + exit_txn   # buying back: worse (higher) price
+            else:
+                price = price - exit_txn   # selling: worse (lower) price
             if label not in bt.tranches_closed:
                 bt.tranches_closed[label] = price
                 if label == "A":
@@ -473,10 +486,14 @@ class BacktestEngine:
                     bt.trail_stop = price
 
         def finalize_trade(state: str, final_exit: float):
-            # Close any remaining tranches at final_exit
+            # Apply exit cost to remaining tranches closed at final_exit
+            if direction == "SHORT":
+                adj_exit = final_exit + exit_txn
+            else:
+                adj_exit = final_exit - exit_txn
             for label in tranche_map:
                 if label not in bt.tranches_closed:
-                    bt.tranches_closed[label] = final_exit
+                    bt.tranches_closed[label] = adj_exit
             
             # Weighted average calculations
             total_r = 0.0
@@ -716,12 +733,33 @@ class BacktestEngine:
             for _, bar in future.iterrows():
                 high = float(bar["high"])
                 low  = float(bar["low"])
+                bar_open = float(bar["open"])
+                high_first = abs(high - bar_open) < abs(bar_open - low)
+                
                 if direction == "SHORT":
-                    if low  <= t1:    outcome = "T1_HIT";   break
-                    if high >= stop:  outcome = "STOP_HIT"; break
+                    t1_hit = low <= t1
+                    stop_hit = high >= stop
+                    if t1_hit and stop_hit:
+                        outcome = "T1_HIT" if not high_first else "STOP_HIT"
+                        break
+                    if t1_hit:
+                        outcome = "T1_HIT"
+                        break
+                    if stop_hit:
+                        outcome = "STOP_HIT"
+                        break
                 else:
-                    if high >= t1:    outcome = "T1_HIT";   break
-                    if low  <= stop:  outcome = "STOP_HIT"; break
+                    t1_hit = high >= t1
+                    stop_hit = low <= stop
+                    if t1_hit and stop_hit:
+                        outcome = "T1_HIT" if high_first else "STOP_HIT"
+                        break
+                    if t1_hit:
+                        outcome = "T1_HIT"
+                        break
+                    if stop_hit:
+                        outcome = "STOP_HIT"
+                        break
 
             rows.append({
                 "date":      sig_date,

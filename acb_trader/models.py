@@ -6,7 +6,10 @@ All dataclasses used across the system.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from acb_trader.signals._scoring import ScoreBreakdown
 
 
 # ── MARKET CLASSIFICATION ─────────────────────────────────────────────────────
@@ -160,7 +163,7 @@ class Setup:
     ema_coil_confirmed: bool
     expires: date
     notes: str
-    breakdown: object = field(default=None)  # ScoreBreakdown; object avoids circular import
+    breakdown: Optional["ScoreBreakdown"] = field(default=None)  # ScoreBreakdown; object avoids circular import
 
 
 # ── SESSION LEVELS (live) ─────────────────────────────────────────────────────
@@ -285,5 +288,5 @@ class WeeklyReviewReport:
     pattern_breakdown: dict             # pattern → {trades, wins, total_r}
     discards_would_have_hit: int        # discarded setups that would have reached T1
     discards_total: int
-    weekly_pnl_pct: float               # (balance_friday - balance_monday) / balance_monday
+    weekly_dd_pct: float                # (balance_friday - balance_monday) / balance_monday
     generated_at: datetime

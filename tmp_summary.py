@@ -1,5 +1,11 @@
 import pandas as pd
-df = pd.read_csv('backtest_results.csv')
+import sys
+
+try:
+    df = pd.read_csv('backtest_results.csv')
+except FileNotFoundError:
+    print("Error: backtest_results.csv not found")
+    sys.exit(1)
 print(f'Total Trades: {len(df)}')
 print(f'Total R: {df["r_multiple"].sum():.2f}')
 print(f'Win Rate: {(df["r_multiple"] > 0).mean():.1%}')

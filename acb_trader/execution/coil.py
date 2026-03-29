@@ -9,7 +9,8 @@ import pandas as pd
 import numpy as np
 from acb_trader.config import (
     EMA_COIL_PERIODS, EMA_COIL_TIGHT_MULT, EMA_ENTRY_PERIOD,
-    COIL_SIDEWAYS_BARS, TWO_SIDED_PIPS, TWO_SIDED_CANDLES
+    COIL_SIDEWAYS_BARS, TWO_SIDED_PIPS, TWO_SIDED_CANDLES,
+    COIL_SIDEWAYS_ATR_MULT
 )
 from acb_trader.db.models import CoilState, InitialBalance, Setup
 from acb_trader.data.levels import (
@@ -35,7 +36,7 @@ def has_ema_coil_htf(ohlcv_htf: pd.DataFrame, atr14: float) -> bool:
 
     # Last 3 bars sideways
     last3_range = float(ohlcv_htf["high"].iloc[-3:].max() - ohlcv_htf["low"].iloc[-3:].min())
-    coil_sideways = last3_range <= 2.0 * atr14   # 2×ATR: bars overlapping but not expanding
+    coil_sideways = last3_range <= COIL_SIDEWAYS_ATR_MULT * atr14   # Configurable ATR multiplier
     return coil_tight and coil_sideways
 
 

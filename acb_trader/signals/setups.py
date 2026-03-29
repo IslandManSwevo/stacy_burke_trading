@@ -10,6 +10,7 @@ from datetime import datetime, date, timedelta
 from typing import Optional
 import acb_trader.config as cfg
 from acb_trader.db.models import Setup, MarketState, WeeklyTemplate, DiscardedSetup
+from acb_trader.signals.patterns import get_rr_floor, is_signal
 from acb_trader.data.levels import (
     compute_atr, snap_to_quarter, snap_stop_beyond, get_pip_size, price_to_pips,
     compute_close_streak,
@@ -59,6 +60,7 @@ def detect_setups(
         _detect_parabolic_reversal,
         _detect_monday_false_break,
         _detect_low_hanging_fruit,
+        _detect_ib_extreme,
     ]
 
     for fn in detectors:
@@ -77,23 +79,21 @@ def detect_setups(
         prior_streak = compute_close_streak(daily_ohlcv["close"].iloc[:-1])
         from acb_trader.signals._scoring import score_setup
         bd = score_setup(setup, state, template, ema_coil)
-        # IFB Volume Expansion: additive bonus not in score_setup() — preserved here.
-        # false-break day tick volume ≥ ratio × inside day → confirms institutional rejection.
-        if (setup.pattern == "INSIDE_FALSE_BREAK"
-                and len(daily_ohlcv) >= 2
-                and "volume" in daily_ohlcv.columns):
-            _vol_fb = float(daily_ohlcv["volume"].iloc[-1])
-            _vol_id = float(daily_ohlcv["volume"].iloc[-2])
-            if _vol_id > 0 and _vol_fb / _vol_id >= cfg.IFB_VOL_EXPANSION_RATIO:
-                bd.total = min(bd.total + cfg.IFB_VOL_EXPANSION_BONUS, 14)
+        if setup.pattern == "INSIDE_FALSE_BREAK":
+            bd.total = _apply_ifb_volume_bonus(daily_ohlcv, bd.total)
         setup.score = bd.total
         setup.breakdown = bd
         setup.ema_coil_confirmed = ema_coil
-        setup.trade_type = "FIVE_STAR_SCALABLE" if (ema_coil or setup.score >= cfg.FIVE_STAR_SCORE) else "SESSION_TRADE"
+        setup.trade_type = "FIVE_STAR_SCALABLE" if setup.score >= cfg.FIVE_STAR_SCORE else "SESSION_TRADE"
 
-        # Scoring floor — FGD now gets its proper +2 bonus (same as FRD), so standard floor applies
-        # IFB: data shows 100% hit rate for discards — lowering floor to 6 to unlock this edge.
-        floor = 6 if setup.pattern == "INSIDE_FALSE_BREAK" else cfg.MIN_SETUP_SCORE
+        # Scoring floor — per-pattern overrides for patterns whose discarded trades show
+        # higher WR than accepted trades (scoring inversion confirmed in backtest analysis).
+        # IFB discards: 67% WR; MFB discards: 61% WR — both above MIN_SETUP_SCORE=7 accepted trades.
+        # Lowering both to 5 captures high-quality structural setups the score mistakenly rejected.
+        if setup.pattern in ("INSIDE_FALSE_BREAK", "MONDAY_FALSE_BREAK"):
+            floor = 5
+        else:
+            floor = cfg.MIN_SETUP_SCORE
         if setup.score < floor:
             d = _discard(pair, setup.pattern, setup.direction, setup.score, "BELOW_MIN_SCORE")
             # Capture price levels so discard_analysis() can simulate would_have_hit_t1
@@ -109,8 +109,10 @@ def detect_setups(
             continue
 
         # Litmus Test for Professional Size (100-Lot Test)
+        # NOTE: Litmus pass is tracked but does NOT override trade_type while
+        # FIVE_STAR is disabled (WR < 46% makes tranche structure destructive).
         if passes_100_lot_test(setup, template):
-            setup.trade_type = "FIVE_STAR_SCALABLE"
+            setup.litmus_passed = True
             setup.notes += " | ✅ 100-Lot Litmus Test Passed"
 
         valid.append(setup)
@@ -157,13 +159,14 @@ def _detect_pump_coil_dump(
 
     # Check 1: each pump day (excluding coil) must have range >= 0.50 × ATR14
     # Filters clear doji pump days without penalising the intentionally tight coil.
-    for _, row in pump_quality_days.iterrows():
-        if float(row["high"]) - float(row["low"]) < 0.50 * atr14:
-            return None, "PCD_PUMP_DAY_LIMP"
-
-    # Check 2: Displacement (Net move of pump)
-    # Lowered to 0.8 ATR to capture valid 2-day cycles (Iteration 3)
-    if abs(pump_end_close - pre_pump_close) < 0.8 * atr14:
+    # Check 3: coil day (Day -1) must NOT be a new 5-day high (bearish) or low (bullish)
+    # "If it does, the pump is still in progress — wait" (Playbook §Pattern 1 Step 2)
+    pump_high = float(pump_quality_days["high"].max())
+    pump_low  = float(pump_quality_days["low"].min())
+    if direction == "SHORT" and float(coil["high"]) >= pump_high:
+        return None, "PCD_PUMP_STILL_IN_PROGRESS"
+    if direction == "LONG"  and float(coil["low"])  <= pump_low:
+        return None, "PCD_PUMP_STILL_IN_PROGRESS"
         return None, "PCD_PUMP_NO_DISPLACEMENT"
 
     # Check 3: coil day (Day -1) must NOT be a new 5-day high (bearish) or low (bullish)
@@ -720,6 +723,123 @@ def _detect_low_hanging_fruit(
     ), ""
 
 
+# ── PATTERN 7: IB EXTREME (Backside test of Mon-Tue Opening Range) ───────────
+
+def _detect_ib_extreme(
+    pair, state, template, ohlcv, atr14, as_of: Optional[date] = None
+) -> Optional[tuple[Optional[Setup], str]]:
+    """
+    Pattern 7: IB Extreme
+    The Operational Process Standard describes price testing the Monday-Tuesday
+    Initial Balance high or low on the backside (Wed-Fri).  When price pokes
+    through the OR extreme and closes back inside, it's a false-break fade.
+
+    Structural similarity to MFB but fires LATER in the week — price has had
+    more time to prove the breakout failed.
+    """
+    if len(ohlcv) < 3:
+        return None, ""
+
+    pip = get_pip_size(pair)
+    signal_date = as_of if as_of else datetime.now(cfg.ET).date()
+    dow = signal_date.weekday()
+
+    # Backside only: Wed (2), Thu (3), Fri (4)
+    if dow not in (2, 3, 4):
+        return None, ""
+
+    # Opening Range must be complete (Mon + Tue data established)
+    orng = template.opening_range
+    if orng is None or not orng.complete:
+        return None, ""
+
+    or_high = orng.high
+    or_low  = orng.low
+    or_mid  = orng.midpoint
+    or_range = or_high - or_low
+
+    # Opening Range must be meaningful (>= MIN_IB_RANGE_PIPS)
+    or_range_pips = price_to_pips(or_range, pair)
+    if or_range_pips < cfg.MIN_IB_RANGE_PIPS:
+        return None, ""
+
+    today = ohlcv.iloc[-1]
+    today_high  = float(today["high"])
+    today_low   = float(today["low"])
+    today_close = float(today["close"])
+    today_open  = float(today["open"])
+
+    # Proximity threshold: within 10 pips of OR extreme
+    prox = 10 * pip
+
+    # SHORT: today tests OR high and closes back below it (false break)
+    tested_high = today_high >= (or_high - prox)
+    closed_below_high = today_close < or_high
+
+    # LONG: today tests OR low and closes back above it (false break)
+    tested_low = today_low <= (or_low + prox)
+    closed_above_low = today_close > or_low
+
+    if not (tested_high and closed_below_high) and not (tested_low and closed_above_low):
+        return None, ""
+
+    # Prefer the direction with a stronger rejection candle
+    if tested_high and closed_below_high:
+        direction = "SHORT"
+        # Rejection quality: close should be in lower half of today's range
+        today_range = today_high - today_low
+        if today_range > 0:
+            close_pct = (today_close - today_low) / today_range
+            if close_pct > 0.50:
+                return None, "IB_EXTREME_WEAK_REJECTION"
+
+        entry = snap_to_quarter(today_close, pair)
+        stop  = snap_stop_beyond(today_high + 2 * pip, "SHORT", pair)
+        t1    = snap_to_quarter(or_mid, pair)                    # 50% of OR range
+        t2    = snap_to_quarter(or_low, pair)                    # Opposite OR extreme
+
+    elif tested_low and closed_above_low:
+        direction = "LONG"
+        today_range = today_high - today_low
+        if today_range > 0:
+            close_pct = (today_close - today_low) / today_range
+            if close_pct < 0.50:
+                return None, "IB_EXTREME_WEAK_REJECTION"
+
+        entry = snap_to_quarter(today_close, pair)
+        stop  = snap_stop_beyond(today_low - 2 * pip, "LONG", pair)
+        t1    = snap_to_quarter(or_mid, pair)                    # 50% of OR range
+        t2    = snap_to_quarter(or_high, pair)                   # Opposite OR extreme
+    else:
+        return None, ""
+
+    risk_pips = price_to_pips(abs(entry - stop), pair)
+    if risk_pips < 10:
+        stop = snap_stop_beyond(
+            stop + (10 * pip if direction == "SHORT" else -10 * pip), direction, pair
+        )
+        risk_pips = price_to_pips(abs(entry - stop), pair)
+
+    if not _valid_stop(pair, risk_pips, atr14):
+        return None, f"STOP_TOO_WIDE_{risk_pips:.1f}_pips"
+    if price_to_pips(abs(t1 - entry), pair) < cfg.MIN_TARGET_PIPS:
+        return None, "TARGET_TOO_CLOSE"
+
+    tomorrow = _next_trading_day(signal_date)
+    return Setup(
+        pair=pair, pattern="IB_EXTREME", direction=direction,
+        entry_price=entry, stop_price=stop, target_1=t1, target_2=t2, target_3=None,
+        risk_pips=risk_pips, score=0, trade_type="SESSION_TRADE",
+        signal_date=signal_date, entry_date=tomorrow,
+        ema_coil_confirmed=False, expires=tomorrow,
+        notes=(
+            f"IB Extreme: {direction} — OR {or_high:.5f}/{or_low:.5f}, "
+            f"tested {'high' if direction == 'SHORT' else 'low'}, "
+            f"closed back inside at {today_close:.5f}"
+        ),
+    ), ""
+
+
 # ── SCORING ───────────────────────────────────────────────────────────────────
 # Scoring logic lives in _scoring.py (ScoreBreakdown) and patterns.py (PatternDef).
 # _score() is kept as a thin compatibility shim; new code calls score_setup() directly.
@@ -736,18 +856,23 @@ def _score(
     from acb_trader.signals._scoring import score_setup
     bd = score_setup(setup, state, template, ema_coil)
     total = bd.total
-    # IFB Volume Expansion: additive bonus preserved here (not in score_setup).
-    if (setup.pattern == "INSIDE_FALSE_BREAK"
-            and ohlcv is not None and len(ohlcv) >= 2
-            and "volume" in ohlcv.columns):
-        _vol_fb = float(ohlcv["volume"].iloc[-1])
-        _vol_id = float(ohlcv["volume"].iloc[-2])
-        if _vol_id > 0 and _vol_fb / _vol_id >= cfg.IFB_VOL_EXPANSION_RATIO:
-            total = min(total + cfg.IFB_VOL_EXPANSION_BONUS, 14)
+    if setup.pattern == "INSIDE_FALSE_BREAK":
+        total = _apply_ifb_volume_bonus(ohlcv, total)
     return total
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
+
+def _apply_ifb_volume_bonus(ohlcv: Optional[pd.DataFrame], current_total: int) -> int:
+    """Additive bonus if false-break tick volume >= ratio * inside day volume."""
+    if ohlcv is not None and len(ohlcv) >= 2 and "volume" in ohlcv.columns:
+        _vol_fb = float(ohlcv["volume"].iloc[-1])
+        _vol_id = float(ohlcv["volume"].iloc[-2])
+        if _vol_id > 0 and _vol_fb / _vol_id >= cfg.IFB_VOL_EXPANSION_RATIO:
+            return min(current_total + cfg.IFB_VOL_EXPANSION_BONUS, 14)
+    return current_total
+
+
 
 def _valid_stop(pair: str, risk_pips: float, max_atr_mult: float) -> bool:
     cls = cfg.INSTRUMENT_CLASS.get(pair, "CURRENCIES")
@@ -764,23 +889,19 @@ def _is_diddle(setup: Setup, template: WeeklyTemplate) -> bool:
     # trader thesis doesn't require anchor proximity; the HCOM/LCOM proximity
     # gate (in detect_setups) handles directional confluence for these.
     # Anchor confluence only applies to non-signal patterns.
-    is_signal_pattern = (
-        "DAY" in setup.pattern
-        or "FALSE_BREAK" in setup.pattern
-        or "PUMP_COIL_DUMP" in setup.pattern
-        or "LOW_HANGING_FRUIT" in setup.pattern
-    )
+    is_signal_pattern = is_signal(setup.pattern)
 
     # 1. Anchor Confluence — only for non-signal patterns
     if not is_signal_pattern:
         if not _has_anchor_confluence(setup.entry_price, template.anchors, pip):
             return True
 
-    # 2. Risk/Reward floor (1:1 for Signal patterns, 2:1 for others)
+    # 2. Risk/Reward floor — per-pattern minimum from patterns.py (single source of truth).
+    # All patterns now require genuine asymmetric R:R; FRD/FGD moved back to 2:1
+    # (1:1 compromise was producing "garbage" entries per methodology review).
     t1_dist = price_to_pips(abs(setup.target_1 - setup.entry_price), setup.pair)
     rr = t1_dist / (setup.risk_pips or 1)
-    rr_floor = 1.0 if is_signal_pattern else 2.0
-    if rr < rr_floor:
+    if rr < get_rr_floor(setup.pattern):
         return True
 
     return False

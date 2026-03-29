@@ -3,11 +3,11 @@
     "allow": [
       "mcp__Claude_Preview__preview_start",
       "Bash(python -X utf8 -m acb_trader.backtest.run_backtest)",
-      "Bash(dir \"C:\\\\Users\\\\green\\\\stacy_burke_trading\" /b)",
-      "Read(//c/Users/green/Downloads/**)",
-      "Bash(python3:*)",
-      "Bash(ls -lh \"/c/Users/green/Downloads/files \\(8\\).zip\")",
-      "Bash(python -c \":*)"
+      "Bash(Get-ChildItem -Name \"C:\\\\Users\\\\green\\\\stacy_burke_trading\")",
+      "Read(C:\\\\Users\\\\green\\\\Downloads\\\\files (8).zip)",
+      "Bash(Get-Item -Path \"C:\\\\Users\\\\green\\\\Downloads\\\\files (8).zip\")",
+      "Bash(python -m acb_trader.module_name)",
+      "Bash(python -c \"specific code here\")"
     ]
   }
 }

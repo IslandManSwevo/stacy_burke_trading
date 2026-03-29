@@ -28,10 +28,15 @@ def check_coil_stats(file_path):
     df['spread_atr'] = df['spread'] / df['atr14']
     
     # Stats
+    # Stats
+    if len(df) == 0:
+        print("No data to analyze")
+        return
     for threshold in [0.5, 0.75, 1.0, 1.25]:
         count = (df['spread_atr'] <= threshold).sum()
         pct = count / len(df) * 100
         print(f"Threshold {threshold:4.2f}x ATR: {count:4d} days ({pct:4.1f}%)")
 
-print("EURUSD Daily EMA Coil Stats (2022-2024):")
-check_coil_stats('backtest_data/EURUSD_D1.csv')
+if __name__ == '__main__':
+    print("EURUSD Daily EMA Coil Stats (2022-2024):")
+    check_coil_stats('backtest_data/EURUSD_D1.csv')

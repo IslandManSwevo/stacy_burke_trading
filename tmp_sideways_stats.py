@@ -19,10 +19,15 @@ def check_sideways_stats(file_path):
     df['range3_atr'] = df['range3'] / df['atr14']
     
     # Stats
+    if len(df) == 0:
+        print("no data")
+        return
+
     for threshold in [0.75, 1.0, 1.25, 1.5, 2.0]:
         count = (df['range3_atr'] <= threshold).sum()
         pct = count / len(df) * 100
         print(f"3-Day Range {threshold:4.2f}x ATR: {count:4d} days ({pct:4.1f}%)")
 
-print("EURUSD Daily Sideways Stats (2022-2024):")
-check_sideways_stats('backtest_data/EURUSD_D1.csv')
+if __name__ == '__main__':
+    print("EURUSD Daily Sideways Stats (2022-2024):")
+    check_sideways_stats('backtest_data/EURUSD_D1.csv')
