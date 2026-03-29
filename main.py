@@ -7,6 +7,8 @@ Orchestrates the full signal pipeline: classify → watchlist → weekly → set
 from __future__ import annotations
 import os
 import sys
+import json
+import dataclasses
 import schedule
 import time
 from datetime import datetime, date, timedelta
@@ -16,7 +18,7 @@ from acb_trader.config import (
     ET, BASKETS, EOD_RUN_OFFSET_MIN, NY_CLOSE_HOUR,
 )
 from acb_trader.data.feed import BrokerFeed
-from acb_trader.data.calendar import is_news_blocked
+from acb_trader.data.calendar import get_blocking_events
 from acb_trader.signals.classify import classify_market_state, rank_basket
 from acb_trader.signals.watchlist import evaluate_watchlist
 from acb_trader.signals.setups import detect_setups, assert_eod_complete
@@ -32,6 +34,42 @@ from acb_trader.db.session_tracker import (
     compute_account_metrics, log_discard,
 )
 from acb_trader.signals.weekly import build_weekly_template, build_weekly_review
+
+
+PAUSED_SETUPS_PATH = os.path.join(os.path.dirname(__file__), "paused_setups.json")
+
+
+def _save_paused_setups(setups: list) -> None:
+    """Persist news-paused setups to disk for the intraday re-arm check."""
+    existing: list[dict] = []
+    if os.path.exists(PAUSED_SETUPS_PATH):
+        try:
+            with open(PAUSED_SETUPS_PATH) as fh:
+                existing = json.load(fh)
+        except Exception:
+            existing = []
+
+    def _serialise(s) -> dict:
+        d = dataclasses.asdict(s)
+        # Convert non-serialisable types
+        for k, v in d.items():
+            if isinstance(v, (date, datetime)):
+                d[k] = v.isoformat()
+        # news_events contains NewsEvent dataclasses — already dict after asdict
+        return d
+
+    new_entries = [_serialise(s) for s in setups]
+    # De-duplicate by pair+pattern+entry_date
+    seen = {(e["pair"], e["pattern"], e["entry_date"]) for e in existing}
+    for entry in new_entries:
+        key = (entry["pair"], entry["pattern"], entry["entry_date"])
+        if key not in seen:
+            existing.append(entry)
+            seen.add(key)
+
+    with open(PAUSED_SETUPS_PATH, "w") as fh:
+        json.dump(existing, fh, indent=2, default=str)
+    print(f"[main] {len(new_entries)} setup(s) written to paused_setups.json")
 
 
 # ── EOD PIPELINE ──────────────────────────────────────────────────────────────
@@ -152,31 +190,43 @@ def run_eod(feed: BrokerFeed):
                 h4_ohlcv = feed.get_ohlcv(pair, "H4", count=50) if hasattr(feed, "get_ohlcv") else daily_ohlcv
                 ema_coil = has_ema_coil_htf(h4_ohlcv, state.atr14)
 
+                # 15-min bars for FRD/FGD coil-stop calculation
+                m15_ohlcv = feed.get_15min_bars(pair, count=48)
+
                 # Step 4: Detect setups
                 setups, discarded = detect_setups(
                     state=state,
                     template=template,
                     daily_ohlcv=daily_ohlcv,
                     ema_coil=ema_coil,
+                    m15_ohlcv=m15_ohlcv,
                 )
                 discarded_log.extend(discarded)
                 # Persist discards for weekly review hindsight analysis
                 for d in discarded:
                     log_discard(d)
 
-                # Step 4b: News filter — skip setups where high-impact news
-                # falls within 1 hr before / 3 hrs after the entry session open
-                clean_setups = []
+                # Step 4b: News filter — pause (not abort) setups blocked by MRN.
+                # Paused setups are written to paused_setups.json for intraday re-arm
+                # after the news spike settles into a 5-min EMA coil.
+                clean_setups: list = []
+                paused_setups: list = []
                 for s in setups:
                     entry_dt = datetime(
                         s.entry_date.year, s.entry_date.month, s.entry_date.day,
                         8, 30, tzinfo=ET,   # NY session open proxy
                     )
-                    if is_news_blocked(s.pair, entry_dt):
-                        print(f"  {s.pair} {s.pattern}: NEWS BLOCKED on {s.entry_date} — skipped")
+                    blocking = get_blocking_events(s.pair, entry_dt)
+                    if blocking:
+                        s.news_events = blocking
+                        paused_setups.append(s)
+                        titles = [e.title for e in blocking]
+                        print(f"  {s.pair} {s.pattern}: NEWS PAUSED — {titles}")
                     else:
                         clean_setups.append(s)
                 setups = clean_setups
+                if paused_setups:
+                    _save_paused_setups(paused_setups)
 
                 # Force FIVE_STAR if passes 100-lot test
                 for s in setups:

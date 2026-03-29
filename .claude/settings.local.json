@@ -7,7 +7,9 @@
       "Read(C:\\\\Users\\\\green\\\\Downloads\\\\files (8).zip)",
       "Bash(Get-Item -Path \"C:\\\\Users\\\\green\\\\Downloads\\\\files (8).zip\")",
       "Bash(python -m acb_trader.module_name)",
-      "Bash(python -c \"specific code here\")"
+      "Bash(python -c \"specific code here\")",
+      "Bash(python -c \"from acb_trader.signals.setups import detect_setups; print\\(''OK''\\)\")",
+      "Bash(cmd /c \"python -c \"\"from acb_trader.signals.setups import detect_setups; print\\(''setups OK''\\)\"\"\")"
     ]
   }
 }

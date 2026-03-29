@@ -15,6 +15,7 @@ from acb_trader.data.levels import (
     compute_atr, snap_to_quarter, snap_stop_beyond, get_pip_size, price_to_pips,
     compute_close_streak,
 )
+from acb_trader.execution.coil import wait_for_ema_coil
 
 
 # ── GUARDS ────────────────────────────────────────────────────────────────────
@@ -40,12 +41,13 @@ def detect_setups(
     daily_ohlcv: pd.DataFrame,
     ema_coil: bool = False,
     as_of: Optional[date] = None,
+    m15_ohlcv: Optional[pd.DataFrame] = None,
 ) -> tuple[list[Setup], list[DiscardedSetup]]:
     """
     Run all pattern detectors. Returns (valid_setups, discarded_setups).
     Caller must have already confirmed EOD is complete.
     """
-    if state.state == "RANGING" and state.substate == "RANGING":
+    if state.state == "RANGING":
         return [], [_discard(state.pair, "NONE", "NEUTRAL", 0, "MARKET_IS_RANGING")]
 
     pair = state.pair
@@ -64,7 +66,8 @@ def detect_setups(
     ]
 
     for fn in detectors:
-        result = fn(pair, state, template, daily_ohlcv, atr14, as_of)
+        extra = {"m15_ohlcv": m15_ohlcv} if fn is _detect_first_red_day else {}
+        result = fn(pair, state, template, daily_ohlcv, atr14, as_of, **extra)
         if result is None:
             continue
         setup, reason = result
@@ -239,7 +242,8 @@ def _detect_pump_coil_dump(
 # ── PATTERN 2: FIRST RED DAY / FIRST GREEN DAY ───────────────────────────────
 
 def _detect_first_red_day(
-    pair, state, template, ohlcv, atr14, as_of: Optional[date] = None
+    pair, state, template, ohlcv, atr14, as_of: Optional[date] = None,
+    m15_ohlcv: Optional[pd.DataFrame] = None,
 ) -> Optional[tuple[Optional[Setup], str]]:
     """Pattern 2: First Red Day/First Green Day."""
     # ── DAY-OF-WEEK GATE ──────────────────────────────────────────────────────
@@ -347,12 +351,26 @@ def _detect_first_red_day(
     start_idx = max(-(streak_len + 2), -len(ohlcv))
     trend_start_price = float(ohlcv["close"].iloc[start_idx])   # for T2
 
+    # Determine stop reference: 15-min EMA coil (tight) preferred over daily bar (wide).
+    # The coil is the actual entry trigger — stop must sit behind its extreme, not the
+    # full daily bar range. Falls back to daily bar if no coil is found in the data.
+    _coil = wait_for_ema_coil(pair, entry_price, direction, m15_ohlcv) \
+        if m15_ohlcv is not None and len(m15_ohlcv) >= 20 else None
+    if _coil and _coil.triggered and _coil.coil_high > 0 and _coil.coil_low > 0:
+        coil_ref_high = _coil.coil_high
+        coil_ref_low  = _coil.coil_low
+        coil_stop_note = "15m-coil"
+    else:
+        coil_ref_high = float(today["high"])
+        coil_ref_low  = float(today["low"])
+        coil_stop_note = "daily-bar-fallback"
+
     if direction == "SHORT":
-        stop = snap_stop_beyond(float(today["high"]) + 2*pip, "SHORT", pair)
+        stop = snap_stop_beyond(coil_ref_high + 2*pip, "SHORT", pair)
         t1   = snap_to_quarter(entry - atr14, pair)             # 1 ATR step (reachable)
         t2   = snap_to_quarter(trend_start_price, pair)         # 100% retrace (round-trip)
     else:
-        stop = snap_stop_beyond(float(today["low"]) - 2*pip, "LONG", pair)
+        stop = snap_stop_beyond(coil_ref_low - 2*pip, "LONG", pair)
         t1   = snap_to_quarter(entry + atr14, pair)
         t2   = snap_to_quarter(trend_start_price, pair)
 
@@ -373,7 +391,7 @@ def _detect_first_red_day(
         risk_pips=risk_pips, score=0, trade_type="SESSION_TRADE",
         signal_date=signal_date, entry_date=tomorrow,
         ema_coil_confirmed=False, expires=tomorrow,
-        notes=f"First {'Red' if is_frd else 'Green'} Day confirmed",
+        notes=f"First {'Red' if is_frd else 'Green'} Day confirmed | stop={coil_stop_note}",
     ), ""
 
 

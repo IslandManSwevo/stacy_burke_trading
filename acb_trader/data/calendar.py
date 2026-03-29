@@ -74,14 +74,23 @@ def get_currencies(pair: str) -> list[str]:
     return mapping.get(pair.upper(), ["USD"])
 
 
+def get_blocking_events(pair: str, session_open: datetime) -> list[NewsEvent]:
+    """
+    Return the HIGH-impact news events that block this pair around session_open.
+    Block window = 1hr before → 3hrs after session open.
+    Returns an empty list when no blocking events exist.
+    """
+    currencies = get_currencies(pair)
+    window_start = session_open - timedelta(hours=1)
+    window_end   = session_open + timedelta(hours=3)
+    events = fetch_calendar(window_start, window_end, impact="HIGH")
+    return [e for e in events if e.currency in currencies]
+
+
 def is_news_blocked(pair: str, session_open: datetime) -> bool:
     """
     Returns True if a HIGH-impact news event falls within the block window
     for this pair's currencies around the session open time.
     Block = 1hr before → 3hrs after session open.
     """
-    currencies = get_currencies(pair)
-    window_start = session_open - timedelta(hours=1)
-    window_end   = session_open + timedelta(hours=3)
-    events = fetch_calendar(window_start, window_end, impact="HIGH")
-    return any(e.currency in currencies for e in events)
+    return bool(get_blocking_events(pair, session_open))
