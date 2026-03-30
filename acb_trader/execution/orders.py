@@ -73,6 +73,59 @@ class MT5Client:
         err = result.comment if result else mt5.last_error()
         return OrderResult(False, message=str(err))
 
+    def place_market_order(
+        self,
+        setup: Setup,
+        lot_size: float,
+    ) -> OrderResult:
+        """
+        Fire an immediate MARKET order at the current ask/bid.
+        Used exclusively by the 5-min drop-down trigger — never for EOD pending entries.
+        News settle window check is enforced identically to place_limit_order.
+        """
+        now = datetime.now(ET)
+        if is_in_news_settle_window(setup.pair, now):
+            msg = (f"BLOCKED: {setup.pair} inside 30-min MRN settle window "
+                   f"— market order rejected")
+            print(f"[orders] {msg}")
+            return OrderResult(False, message=msg)
+
+        if not MT5_AVAILABLE:
+            print(f"[orders] PAPER: MARKET {setup.direction} {setup.pair} "
+                  f"SL={setup.stop_price:.5f} TP={setup.target_1:.5f} lots={lot_size}")
+            return OrderResult(True, ticket=99998, message="paper")
+
+        tick = mt5.symbol_info_tick(setup.pair)
+        if tick is None:
+            return OrderResult(False, message=f"No tick data for {setup.pair}")
+
+        if setup.direction == "LONG":
+            order_type = mt5.ORDER_TYPE_BUY
+            price = tick.ask
+        else:
+            order_type = mt5.ORDER_TYPE_SELL
+            price = tick.bid
+
+        req = {
+            "action":    mt5.TRADE_ACTION_DEAL,
+            "symbol":    setup.pair,
+            "volume":    lot_size,
+            "type":      order_type,
+            "price":     price,
+            "sl":        setup.stop_price,
+            "tp":        setup.target_1,
+            "deviation": 10,
+            "magic":     20250327,
+            "comment":   f"ACB 5m {setup.pattern[:6]}",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        result = mt5.order_send(req)
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            return OrderResult(True, ticket=result.order, message="ok")
+        err = result.comment if result else mt5.last_error()
+        return OrderResult(False, message=str(err))
+
     def cancel_pending(self, ticket: int) -> bool:
         if not MT5_AVAILABLE:
             print(f"[orders] PAPER: cancel ticket {ticket}")

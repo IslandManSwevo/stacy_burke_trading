@@ -9,7 +9,8 @@
       "Bash(python -m acb_trader.module_name)",
       "Bash(python -c \"specific code here\")",
       "Bash(python -c \"from acb_trader.signals.setups import detect_setups; print\\(''OK''\\)\")",
-      "Bash(cmd /c \"python -c \"\"from acb_trader.signals.setups import detect_setups; print\\(''setups OK''\\)\"\"\")"
+      "Bash(cmd /c \"python -c \"\"from acb_trader.signals.setups import detect_setups; print\\(''setups OK''\\)\"\"\")",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

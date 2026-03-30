@@ -76,24 +76,65 @@ def compute_atr(ohlcv: pd.DataFrame, period: int = 14) -> float:
 
 # ── CLOSE STREAK ─────────────────────────────────────────────────────────────
 
-def compute_close_streak(closes: pd.Series) -> int:
+def compute_close_streak(ohlcv_or_closes) -> int:
     """
     Count consecutive closes in the same direction from most recent backwards.
     +3 = 3 higher closes | -2 = 2 lower closes | 0 = unchanged/doji
+
+    Inside Day Absorption (Playbook §Three-Day Rule / Pause & Carry Forward):
+      An Inside Day is defined by price GEOMETRY: the entire daily range is
+      contained within the previous day's boundaries:
+          current_high < yesterday_high AND current_low > yesterday_low
+
+      When the market pumps Day 1, pumps Day 2, then prints an Inside Day on
+      Day 3, the breakout traders are STILL fully trapped up high.  The market
+      has simply paused to coil potential energy before the liquidation.
+
+      On an Inside Day the streak counter PAUSES — it does not increment and
+      absolutely does not reset.  The active streak value carries forward
+      unchanged.  The sequence is only broken by a confirmed directional
+      reversal (e.g., a close in the opposite direction that is NOT an
+      Inside Day).
+
+    Accepts either:
+      - pd.DataFrame with 'high', 'low', 'close' columns  (full geometry)
+      - pd.Series of closes only  (legacy fallback — doji detection only)
     """
+    if isinstance(ohlcv_or_closes, pd.DataFrame):
+        highs  = ohlcv_or_closes["high"].values
+        lows   = ohlcv_or_closes["low"].values
+        closes = ohlcv_or_closes["close"].values
+        has_geometry = True
+    else:
+        closes = ohlcv_or_closes.values
+        highs = lows = None
+        has_geometry = False
+
     streak = 0
     direction = None
-    vals = closes.values
-    for i in range(len(vals) - 1, 0, -1):
-        diff = vals[i] - vals[i - 1]
+
+    for i in range(len(closes) - 1, 0, -1):
+        # ── Inside Day detection ──────────────────────────────────────────
+        if has_geometry:
+            is_inside = (highs[i] < highs[i - 1] and lows[i] > lows[i - 1])
+        else:
+            # Fallback: treat unchanged close as doji/inside-like
+            is_inside = (closes[i] == closes[i - 1])
+
+        if is_inside:
+            continue  # Pause & Carry Forward — streak value unchanged
+
+        # ── Normal directional bar ────────────────────────────────────────
+        diff = closes[i] - closes[i - 1]
         if diff == 0:
-            break
+            continue  # Doji that isn't geometrically inside — still carry
         d = 1 if diff > 0 else -1
         if direction is None:
             direction = d
         elif d != direction:
             break
         streak += direction
+
     return streak
 
 

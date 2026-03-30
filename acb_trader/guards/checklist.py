@@ -110,8 +110,36 @@ def passes_100_lot_test(setup: Setup, template: WeeklyTemplate) -> bool:
     """
     Would a professional trade this with size?
     If True → force FIVE_STAR_SCALABLE tier regardless of score.
+
+    EMA Coil Override (fast path): if a confirmed 15-min tight EMA coil exists
+    at a weekly extreme for a structural reversal pattern, geometry IS the
+    quality signal — no score threshold required.
     """
     pip = get_pip_size(setup.pair)
+
+    major_levels = [
+        template.anchors.current_week_high, template.anchors.current_week_low,
+        template.anchors.current_hcow, template.anchors.current_lcow,
+        template.anchors.prior_week_high, template.anchors.prior_week_low,
+        template.anchors.month_open,
+    ]
+    at_extreme = any(
+        abs(setup.entry_price - lv) <= 25 * pip for lv in major_levels if lv > 0
+    )
+
+    # ── EMA COIL OVERRIDE (Fast Path) ─────────────────────────────────────────
+    # Confirmed 15-min EMA coil (9/20/50 spread <= 0.5×ATR14 for 3+ bars) at
+    # the weekly extreme = potential energy fully loaded.  The coil is a harder
+    # filter than any EOD point system.  Bypasses score >= 7 gate entirely.
+    _coil_force_promote = frozenset({
+        "FIRST_RED_DAY", "FIRST_GREEN_DAY", "MONDAY_FALSE_BREAK",
+    })
+    if (getattr(setup, 'ema_coil_confirmed', False)
+            and setup.pattern in _coil_force_promote
+            and at_extreme):
+        return True
+
+    # ── STANDARD PATH ─────────────────────────────────────────────────────────
     anchor_count = sum(
         1 for lvl in [
             template.anchors.prior_week_high, template.anchors.prior_week_low,
@@ -121,17 +149,17 @@ def passes_100_lot_test(setup: Setup, template: WeeklyTemplate) -> bool:
         if lvl > 0 and abs(setup.entry_price - lvl) <= ANCHOR_CONFLUENCE_PIPS * pip
     )
     stop_dist = price_to_pips(abs(setup.entry_price - setup.stop_price), setup.pair)
-    at_extreme = (
-        abs(setup.entry_price - template.anchors.current_hcow) <= 25 * pip or
-        abs(setup.entry_price - template.anchors.current_lcow) <= 25 * pip
+    priority_patterns = (
+        "FIRST_RED_DAY", "FIRST_GREEN_DAY",
+        "MONDAY_FALSE_BREAK", "PUMP_COIL_DUMP", "PARABOLIC_REVERSAL",
     )
     return (
         setup.score >= 7 and
         template.template_type in ("REVERSAL_WEEK", "NEW_MONTH_BREAKOUT") and
         stop_dist <= 0.75 * template.anchors.prior_week_high * 0.001 and  # proxy
         anchor_count >= 2 and
-        setup.pattern in ("FIRST_RED_DAY", "PUMP_COIL_DUMP", "PARABOLIC_REVERSAL") and
-        (at_extreme or setup.ema_coil_confirmed)
+        setup.pattern in priority_patterns and
+        (at_extreme or getattr(setup, 'ema_coil_confirmed', False))
     )
 
 

@@ -140,14 +140,40 @@ def _get_monthly_phase(days: int) -> str:
 
 
 def _get_day_role(day: str, close_streak: int) -> DayRole:
-    roles = {
-        "MON": DayRole("OPENING_RANGE",    "WAIT"),
-        "TUE": DayRole("FRONT_SIDE_DAY2",  "FRONT_SIDE" if abs(close_streak) >= 2 else "WAIT"),
-        "WED": DayRole("PIVOT",            "FRONT_SIDE" if abs(close_streak) <= 2 else "BACK_SIDE"),
-        "THU": DayRole("BACK_SIDE_DAY1",   "BACK_SIDE"),
-        "FRI": DayRole("EXIT_ONLY",        "NO_ENTRY"),
-    }
-    return roles.get(day, DayRole("UNKNOWN", "WAIT"))
+    """Determine the day's role using STRUCTURAL day count, not rigid calendar.
+
+    The structural day count tracks how many consecutive closes have been
+    committed in the breakout direction (abs(close_streak)).  This anchors
+    "Day 1" to the first Close in Breakout — regardless of which calendar
+    day that falls on.  If Friday was CIB Day 1, Monday is Day 2, and
+    Tuesday is Day 3 — the trap is fully built by Tuesday.
+
+    Front Side = streak is actively building (abs <= 2): range expansion, trap building.
+    Back Side  = streak has matured (abs >= 3) or reversed: liquidation phase.
+    NO_ENTRY   = Friday: exit-only day regardless of structure.
+    WAIT       = No directional conviction yet (streak == 0).
+    """
+    # Friday is always exit-only — no new trades, regardless of structure.
+    if day == "FRI":
+        return DayRole("EXIT_ONLY", "NO_ENTRY")
+
+    abs_streak = abs(close_streak)
+
+    # No directional conviction → wait for structure to develop.
+    if abs_streak == 0:
+        return DayRole("STRUCTURAL_DAY_0", "WAIT")
+
+    # Day 1: first CIB close. Opening range / initial expansion.
+    if abs_streak == 1:
+        return DayRole("STRUCTURAL_DAY_1", "FRONT_SIDE")
+
+    # Day 2: expansion continues. Front Side trap still building.
+    if abs_streak == 2:
+        return DayRole("STRUCTURAL_DAY_2", "FRONT_SIDE")
+
+    # Day 3+: trap is built.  HOW/LOW is locked in.  Back Side begins:
+    # hunt reversals, execute ACB liquidation trades.
+    return DayRole(f"STRUCTURAL_DAY_{abs_streak}", "BACK_SIDE")
 
 
 def _check_locked(ohlcv: pd.DataFrame, close_streak: int) -> tuple[bool, bool]:
@@ -205,7 +231,7 @@ def _compute_close_countdown(
     cib_direction: str,
     anchors: WeeklyAnchors,
 ) -> CloseCountdown:
-    streak = compute_close_streak(ohlcv["close"])
+    streak = compute_close_streak(ohlcv)
     direction_matches = (
         (cib_direction == "BULLISH" and streak > 0) or
         (cib_direction == "BEARISH" and streak < 0)

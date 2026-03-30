@@ -58,6 +58,10 @@ class ScoreBreakdown:
     # Extra PARABOLIC stack (+2 when near HCOW/LCOW AND pattern == PARA)
     para_level_stack:   int   = 0
 
+    # Structural decoupled bonuses (+2 each — calendar-independent)
+    frd_fgd_structural: int   = 0   # FRD/FGD: prior 3HC/3LC streak confirmed (not tied to Wed/Thu)
+    mfb_structural:     int   = 0   # MFB: Monday locked HOW/LOW — Tue entry equally valid as Thu
+
     # Minor bonuses (+1 each)
     backside_phase:     int   = 0   # monthly phase == BACKSIDE
     signal_day_label:   int   = 0   # 3HC/3LC countdown label == SIGNAL_DAY
@@ -74,8 +78,8 @@ class ScoreBreakdown:
             ("EMA coil (4H)",        self.ema_coil),
             ("Near HCOW/LCOW",       self.near_hcow_lcow),
             ("Pattern bonus",        self.pattern_bonus),
-            ("PARA level stack",     self.para_level_stack),
-            ("Backside phase",       self.backside_phase),
+            ("PARA level stack",     self.para_level_stack),            ("FRD/FGD structural",   self.frd_fgd_structural),
+            ("MFB structural",        self.mfb_structural),            ("Backside phase",       self.backside_phase),
             ("3HC/3LC SIGNAL_DAY",   self.signal_day_label),
         ]
         for label, pts in mapping:
@@ -171,6 +175,24 @@ def score_setup(
     ):
         bd.para_level_stack = 2
 
+    # ── Structural decoupled bonuses ─────────────────────────────────────────────
+    # These bonuses fire based on pattern geometry, NOT calendar day.
+    #
+    # FRD/FGD structural: The Three-Day Rule prerequisite (prior_streak >= 3) IS
+    # the edge — trapped breakout traders are committed regardless of weekday.
+    # A Tuesday FGD after Fri-Mon-Tue downtrend has identical fuel to a Thursday
+    # FRD.  Decouples +2 from the wed_thu_signal bonus (which still stacks on
+    # top when the setup fires on Wed/Thu for maximum alignment confirmation).
+    if setup.pattern in ("FIRST_RED_DAY", "FIRST_GREEN_DAY"):
+        bd.frd_fgd_structural = 2
+
+    # MFB structural: Monday sets the weekly opening range trap — the HOW/LOW is
+    # locked from Day 1.  A Tuesday entry is still the first valid confirmation
+    # bar.  Granting the structural equivalent of the wed_thu_signal bonus it
+    # deserves but cannot receive by calendar definition.
+    if setup.pattern == "MONDAY_FALSE_BREAK":
+        bd.mfb_structural = 2
+
     # ── Minor bonuses ─────────────────────────────────────────────────────────
 
     if template.monthly_phase == "BACKSIDE":
@@ -191,6 +213,8 @@ def score_setup(
         + bd.near_hcow_lcow
         + bd.pattern_bonus
         + bd.para_level_stack
+        + bd.frd_fgd_structural
+        + bd.mfb_structural
         + bd.backside_phase
         + bd.signal_day_label
     )

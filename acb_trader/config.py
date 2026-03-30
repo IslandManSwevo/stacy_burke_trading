@@ -175,10 +175,18 @@ BACK_SIDE_PATTERNS = frozenset({
     "FIRST_GREEN_DAY",      # Structural break — Back Side by definition
     "PARABOLIC_REVERSAL",   # Major-level reversal — Back Side only
 })
-FRONT_SIDE_PATTERNS = frozenset({
-    "LOW_HANGING_FRUIT",    # Continuation scalp — Front Side momentum play
-})
+FRONT_SIDE_PATTERNS = frozenset()   # Empty: LHF now allowed all week (Back Side continuation after reversal)
 # IFB, MFB, IB_EXTREME are structurally self-gating (DOW + setup logic)
+
+# ── EMA COIL FORCE-PROMOTE ────────────────────────────────────────────────────
+# Patterns that bypass MIN_SETUP_SCORE when a confirmed 15-min EMA coil is
+# detected at the weekly extreme.  The coil IS the quality gate — potential
+# energy fully loaded means the system executes, not re-scores.
+COIL_FORCE_PROMOTE_PATTERNS = frozenset({
+    "FIRST_RED_DAY",
+    "FIRST_GREEN_DAY",
+    "MONDAY_FALSE_BREAK",
+})
 
 # Patterns that fire through detection & scoring but are flagged [MONITOR ONLY] in Telegram.
 # Single source of truth: acb_trader/signals/patterns.py (PatternDef.monitor_only=True).

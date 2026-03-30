@@ -61,7 +61,7 @@ def classify_market_state(
     cib           = cib_bullish or cib_bearish
     cib_direction = "BULLISH" if cib_bullish else ("BEARISH" if cib_bearish else "NONE")
 
-    close_streak     = compute_close_streak(daily_ohlcv["close"])
+    close_streak     = compute_close_streak(daily_ohlcv)
     day_break_counter = compute_day_break_counter(daily_ohlcv)
 
     contraction_ratio = compute_atr(daily_ohlcv, 3) / atr14 if atr14 > 0 else 1.0
@@ -112,7 +112,7 @@ def classify_market_state(
         prev_row = daily_ohlcv.iloc[-2] if len(daily_ohlcv) > 1 else last_row
 
         # Prior streak (excluding today's bar) — needed for trend prerequisite
-        prior_streak = compute_close_streak(daily_ohlcv["close"].iloc[:-1])
+        prior_streak = compute_close_streak(daily_ohlcv.iloc[:-1])
 
         is_inside = (float(last_row["high"]) < float(prev_row["high"]) and
                      float(last_row["low"])  > float(prev_row["low"]))

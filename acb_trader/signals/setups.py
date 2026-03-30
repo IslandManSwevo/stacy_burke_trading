@@ -95,11 +95,18 @@ def detect_setups(
         if setup is None:
             continue
 
-        # ── WEEKLY PHASE GATE ─────────────────────────────────────────────────
-        # Back Side reversal patterns (PCD, FRD/FGD, Parabolic) are blocked
-        # on Front Side days: the institutional trap hasn't locked in yet.
-        # Front Side continuation patterns (LHF) are blocked on Back Side:
-        # chasing momentum during liquidation phase = catching falling knives.
+        # ── WEEKLY PHASE GATE (structural, not calendar) ─────────────────────
+        # entry_bias is now derived from structural day count (close_streak),
+        # not rigid calendar weekday.  FRONT_SIDE (streak ≤ 2) = trap still
+        # building; BACK_SIDE (streak ≥ 3 or reversed) = liquidation phase.
+        #
+        # Reversal patterns (PCD, FRD/FGD, Parabolic) remain blocked on
+        # FRONT_SIDE: you cannot trap volume when the market is still actively
+        # building the trap.  Each detector also has its own streak >= 3 gate.
+        #
+        # LHF is now UNBLOCKED all week (FRONT_SIDE_PATTERNS is empty) —
+        # once the Back Side reversal fires, Thu/Fri LHF continuation rides
+        # the explosive liquidation move.
         if entry_bias == "FRONT_SIDE" and setup.pattern in cfg.BACK_SIDE_PATTERNS:
             discarded.append(_discard(pair, setup.pattern, setup.direction,
                                       0, "FRONT_SIDE_NO_REVERSALS"))
@@ -114,7 +121,7 @@ def detect_setups(
             continue
 
         # Score and classify
-        prior_streak = compute_close_streak(daily_ohlcv["close"].iloc[:-1])
+        prior_streak = compute_close_streak(daily_ohlcv.iloc[:-1])
         from acb_trader.signals._scoring import score_setup
         bd = score_setup(setup, state, template, ema_coil)
         if setup.pattern == "INSIDE_FALSE_BREAK":
@@ -124,11 +131,21 @@ def detect_setups(
         setup.ema_coil_confirmed = ema_coil
         setup.trade_type = "FIVE_STAR_SCALABLE" if setup.score >= cfg.FIVE_STAR_SCORE else "SESSION_TRADE"
 
+        # ── EMA COIL FORCE-PROMOTE ────────────────────────────────────────────────
+        # A confirmed 15-min tight EMA coil at the weekly extreme is the absolute
+        # ground truth of trapped-volume compression.  All three EMAs (9/20/50)
+        # converging within 0.5×ATR14 for 3+ consecutive bars means potential
+        # energy is fully loaded — the algorithm must execute, not re-score.
+        # Action: set floor=0 (bypass score gate) and force-promote to FIVE_STAR.
+        if setup.ema_coil_confirmed and setup.pattern in cfg.COIL_FORCE_PROMOTE_PATTERNS:
+            setup.trade_type = "FIVE_STAR_SCALABLE"
+            floor = 0   # bypass MIN_SETUP_SCORE entirely
+            setup.notes += " | ⚡ EMA Coil Force-Promoted"
         # Scoring floor — per-pattern overrides for patterns whose discarded trades show
         # higher WR than accepted trades (scoring inversion confirmed in backtest analysis).
         # IFB discards: 67% WR; MFB discards: 61% WR — both above MIN_SETUP_SCORE=7 accepted trades.
         # Lowering both to 5 captures high-quality structural setups the score mistakenly rejected.
-        if setup.pattern in ("INSIDE_FALSE_BREAK", "MONDAY_FALSE_BREAK"):
+        elif setup.pattern in ("INSIDE_FALSE_BREAK", "MONDAY_FALSE_BREAK"):
             floor = 5
         else:
             floor = cfg.MIN_SETUP_SCORE
@@ -165,14 +182,12 @@ def detect_setups(
 def _detect_pump_coil_dump(
     pair, state, template, ohlcv, atr14, as_of: Optional[date] = None
 ) -> Optional[tuple[Optional[Setup], str]]:
-    # ── DAY-OF-WEEK GATE (Weekly Template §Back Side) ──────────────────────────
-    # PCD is a reversal pattern: 3HC/3LC → coil → dump. Firing on Mon/Tue
-    # means the "trap" is still building — institutional capital is still
-    # inducing breakout chasers. Only Wed (pivot) or Thu (Back Side Day 1)
-    # give the trap time to lock in the HOW/LOW before reversal.
-    sig_date = as_of if as_of else datetime.now(cfg.ET).date()
-    if sig_date.weekday() not in (2, 3):   # 2=Wednesday, 3=Thursday
-        return None, "PCD_FRONT_SIDE_BLOCKED"
+    # ── STRUCTURAL GATE (replaces rigid DOW gate) ──────────────────────────────
+    # PCD requires a completed 3-day structural cycle (3HC/3LC), NOT a specific
+    # calendar day.  If Fri=Day1 → Mon=Day2 → Tue=Day3, a Tuesday PCD is fully
+    # valid — the trap is built.  The streak >= 3 check below enforces the
+    # Three-Day Rule structurally; the master phase gate in detect_setups()
+    # handles Front Side / Back Side awareness dynamically.
 
     pip = get_pip_size(pair)
     today = ohlcv.iloc[-1]
@@ -293,13 +308,13 @@ def _detect_first_red_day(
     m15_ohlcv: Optional[pd.DataFrame] = None,
 ) -> Optional[tuple[Optional[Setup], str]]:
     """Pattern 2: First Red Day/First Green Day."""
-    # ── DAY-OF-WEEK GATE ──────────────────────────────────────────────────────
-    # Playbook §Pattern 2 Step 2: "Must occur on Wednesday OR Thursday —
-    # Monday/Tuesday FRD/FGDs are front-side noise — skip."
-    # Weekly Template §Step 5: FRD/FGD on Mon/Tue → "TOO_EARLY_FOR_BACKSIDE"
-    sig_date = as_of if as_of else datetime.now(cfg.ET).date()
-    if sig_date.weekday() not in (2, 3):   # 2=Wednesday, 3=Thursday only
-        return None, "FRD_FGD_WRONG_DOW"
+    # ── STRUCTURAL GATE (replaces rigid DOW gate) ──────────────────────────────
+    # FRD/FGD is structurally defined: first down/up close after a 3-day pump/dump.
+    # The prior_streak >= 3 prerequisite below IS the gate — it ensures the
+    # institutional trap is built regardless of which calendar day it prints.
+    # If Fri=Day1 → Mon=Day2 → Tue=Day3 → Wed prints FRD, that's valid.
+    # If Mon=Day1 → Tue=Day2 → Wed=Day3 → Thu prints FRD, also valid.
+    # 501 valid setups were massacred by the old DOW-only filter.
 
     today = ohlcv.iloc[-1]
     prev  = ohlcv.iloc[-2]
@@ -319,7 +334,7 @@ def _detect_first_red_day(
     # Trend prerequisite (skill doc: "minimum 3 consecutive closes in same direction")
     # We compute the prior streak EXCLUDING today's bar, because today's reversal candle
     # resets state.close_streak to -1/+1 — measuring the prior trend must use iloc[:-1].
-    prior_streak = compute_close_streak(ohlcv["close"].iloc[:-1])
+    prior_streak = compute_close_streak(ohlcv.iloc[:-1])
     # Playbook §Three Higher/Lower Closes: "minimum 3 consecutive closes in same
     # direction" before the reversal candle fires.  Prior threshold of 2 was letting
     # through 1-bar "trends" that lack the trapped-trader fuel Burke requires.
@@ -544,14 +559,13 @@ def _detect_parabolic_reversal(
     Parabolic reversal fires when the daily close is near a named structural level
     after pushing to a new extreme. Entry is on the following session's coil breakdown.
     """
-    # ── DAY-OF-WEEK GATE (Weekly Template §Back Side) ──────────────────────────
-    # Parabolic reversals at major levels are Back Side trades: the HOW/LOW
-    # must be locked in before fading. Mon/Tue = Front Side expansion;
-    # attempting to catch a parabolic top/bottom while the market is still
-    # building the trap is how you blow out the account.
-    sig_date = as_of if as_of else datetime.now(cfg.ET).date()
-    if sig_date.weekday() not in (2, 3):   # 2=Wednesday, 3=Thursday
-        return None, "PARA_FRONT_SIDE_BLOCKED"
+    # ── STRUCTURAL GATE (replaces rigid DOW gate) ──────────────────────────────
+    # Parabolic reversals require a multi-day push INTO a structural level
+    # (streak >= 2 check below) plus a reversal candle.  The push duration
+    # IS the structural prerequisite — if capital has been committed for 2+
+    # days into a named level, the trap is built regardless of calendar DOW.
+    # The master phase gate in detect_setups() provides additional dynamic
+    # Front Side / Back Side awareness without rigid weekday restrictions.
 
     pip = get_pip_size(pair)
     last_close = float(ohlcv["close"].iloc[-1])
@@ -720,14 +734,13 @@ def _detect_low_hanging_fruit(
     Today pulls back to the 50% level of that move — entry there.
     Direction follows the prior explosive candle.
     """
-    # ── DAY-OF-WEEK GATE (Weekly Template §Front Side) ─────────────────────────
-    # LHF is a trend-continuation scalp ("Nail and Bail") — appropriate on
-    # the Front Side when the market is expanding the range. On the Back Side
-    # (Thu/Fri), we are hunting reversals, not continuations; chasing the
-    # prior session's momentum on Thu/Fri = catching a falling knife.
-    sig_date = as_of if as_of else datetime.now(cfg.ET).date()
-    if sig_date.weekday() not in (0, 1, 2):   # 0=Mon, 1=Tue, 2=Wed
-        return None, "LHF_BACK_SIDE_BLOCKED"
+    # ── STRUCTURAL GATE (replaces rigid DOW gate) ──────────────────────────────
+    # LHF is a trend-continuation scalp.  On the Front Side it rides the
+    # expanding range; on the Back Side it scales into the ACB liquidation.
+    # Once the FRD trap is sprung (e.g., Wednesday), Thursday and Friday are
+    # pure LHF continuation days BACK to the opposite side of the weekly range.
+    # Blocking LHF on Thu/Fri killed 374 setups during the most explosive
+    # phase of the weekly liquidation cycle.
 
     if len(ohlcv) < 2:
         return None, ""
@@ -993,24 +1006,38 @@ def _is_diddle(setup: Setup, template: WeeklyTemplate) -> bool:
 def passes_100_lot_test(setup: Setup, template: WeeklyTemplate) -> bool:
     """Professional Size Litmus Test: High Conflict + Structural Conf + Priority Pattern."""
     pip = get_pip_size(setup.pair)
-    
-    # 1. High-Conflict Zone: Entry within 25 pips of a MAJOR level
+
     major_levels = [
         template.anchors.current_week_high, template.anchors.current_week_low,
         template.anchors.current_hcow, template.anchors.current_lcow,
         template.anchors.month_open, template.anchors.prior_week_high,
-        template.anchors.prior_week_low
+        template.anchors.prior_week_low,
     ]
     near_major_level = any(abs(setup.entry_price - lv) <= 25 * pip for lv in major_levels if lv > 0)
-    
+
+    # ── EMA COIL OVERRIDE ─────────────────────────────────────────────────────
+    # Confirmed 15-min coil at a weekly extreme = geometry IS the litmus test.
+    # No score threshold required: the compressed structure speaks for itself.
+    if (getattr(setup, 'ema_coil_confirmed', False)
+            and setup.pattern in cfg.COIL_FORCE_PROMOTE_PATTERNS
+            and near_major_level):
+        return True
+
+    # 1. High-Conflict Zone: Entry within 25 pips of a MAJOR level
+    if not near_major_level:
+        return False
+
     # 2. Structural Confirmation: Template is NOT Ranging
     structural_conf = template.template_type in ("BREAKOUT_WEEK", "REVERSAL_WEEK", "NEW_MONTH_BREAKOUT")
-    
-    # 3. Pattern Priority: Top 3 Patterns
-    priority_patterns = ("PUMP_COIL_DUMP", "FIRST_RED_DAY", "PARABOLIC_REVERSAL")
+
+    # 3. Pattern Priority: PCD, FRD, FGD, MFB, Parabolic — all structural reversal signals
+    priority_patterns = (
+        "PUMP_COIL_DUMP", "FIRST_RED_DAY", "FIRST_GREEN_DAY",
+        "MONDAY_FALSE_BREAK", "PARABOLIC_REVERSAL",
+    )
     pattern_priority = setup.pattern in priority_patterns
-    
-    return near_major_level and structural_conf and pattern_priority
+
+    return structural_conf and pattern_priority
 
 
 def _has_anchor_confluence(price: float, anchors, pip: float) -> bool:
