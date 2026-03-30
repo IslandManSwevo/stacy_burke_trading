@@ -1,7 +1,7 @@
 """
-ACB Trader — EOD Runner
-Fires at 5:04 PM ET daily (Mon–Thu).
-Orchestrates the full signal pipeline: classify → watchlist → weekly → setups → alert.
+ACB Trader — EOD Runner + Intraday Session Supervisor
+EOD pipeline fires at 5:04 PM ET Mon–Thu.
+Intraday supervisors fire at each institutional session open (Asia / London / NY).
 """
 
 from __future__ import annotations
@@ -10,12 +10,14 @@ import sys
 import json
 import dataclasses
 import schedule
+import threading
 import time
 from datetime import datetime, date, timedelta
 import pandas as pd
 
 from acb_trader.config import (
     ET, BASKETS, EOD_RUN_OFFSET_MIN, NY_CLOSE_HOUR,
+    SESSION_WINDOWS, SESSION_PAIRS,
 )
 from acb_trader.data.feed import BrokerFeed
 from acb_trader.data.calendar import get_blocking_events
@@ -24,6 +26,7 @@ from acb_trader.signals.watchlist import evaluate_watchlist
 from acb_trader.signals.setups import detect_setups, assert_eod_complete
 from acb_trader.execution.coil import has_ema_coil_htf
 from acb_trader.execution.sizing import calculate_rr
+from acb_trader.execution.session import run_intraday_session
 from acb_trader.guards.checklist import run_pre_trade_checklist, passes_100_lot_test
 from acb_trader.notifications.telegram import (
     send_eod_briefing, send_setup_armed, send_health_warnings, send_circuit_breaker,
@@ -37,6 +40,14 @@ from acb_trader.signals.weekly import build_weekly_template, build_weekly_review
 
 
 PAUSED_SETUPS_PATH = os.path.join(os.path.dirname(__file__), "paused_setups.json")
+
+# ── SHARED SESSION STATE ──────────────────────────────────────────────────────
+# _ARMED_SETUPS  — populated by run_eod(), consumed by session threads.
+# _TRADED_PAIRS  — pairs already filled today; excluded from later sessions.
+#                  Enforces the no-carry-forward rule across session boundaries.
+_ARMED_SETUPS: list = []
+_TRADED_PAIRS: set  = set()
+_state_lock         = threading.Lock()
 
 
 def _save_paused_setups(setups: list) -> None:
@@ -262,6 +273,16 @@ def run_eod(feed: BrokerFeed):
         print("  No valid setups — sit on hands today")
 
     send_eod_briefing(all_templates[:5], all_setups[:5])
+
+    # ── Arm the session supervisors ───────────────────────────────────────────
+    # Store today's setups so each session launcher can claim its slice.
+    # _TRADED_PAIRS is cleared so tonight's Asia session starts clean.
+    with _state_lock:
+        _ARMED_SETUPS.clear()
+        _ARMED_SETUPS.extend(all_setups)
+        _TRADED_PAIRS.clear()
+    print(f"[main] {len(all_setups)} setup(s) armed for intraday sessions")
+
     print(f"\n[main] EOD run complete {datetime.now(ET).strftime('%H:%M ET')}")
 
 
@@ -298,20 +319,123 @@ def run_weekly_review(feed: BrokerFeed):
     )
 
 
+# ── SESSION LAUNCHER ─────────────────────────────────────────────────────────
+
+def launch_session(session_name: str, feed: BrokerFeed) -> None:
+    """
+    Fire the intraday session supervisor in a daemon thread.
+
+    Filters _ARMED_SETUPS to only the pairs valid for this session.
+    Excludes any pair already filled in an earlier session today (_TRADED_PAIRS).
+    If no setups remain after filtering, exits immediately — no thread spawned.
+    Records filled pairs back into _TRADED_PAIRS on session completion so that
+    the same pair cannot be entered again in a subsequent session today.
+    """
+    now = datetime.now(ET)
+
+    # Hard gate: never run on weekends
+    if now.weekday() >= 5:
+        print(f"[main] {session_name}: weekend — skipped")
+        return
+
+    session_pairs = set(SESSION_PAIRS.get(session_name, []))
+
+    with _state_lock:
+        available = [
+            s for s in _ARMED_SETUPS
+            if s.pair in session_pairs and s.pair not in _TRADED_PAIRS
+        ]
+
+    if not available:
+        print(f"[main] {session_name}: no armed setups — standing down")
+        return
+
+    print(
+        f"[main] {session_name} session OPEN — launching supervisor "
+        f"({len(available)} setup(s): {[s.pair for s in available]})"
+    )
+
+    def _run():
+        try:
+            records = run_intraday_session(available, session_name, feed)
+            if records:
+                filled = {r.pair for r in records}
+                with _state_lock:
+                    _TRADED_PAIRS.update(filled)
+                print(
+                    f"[main] {session_name} complete — "
+                    f"{len(records)} trade(s) closed: {list(filled)}"
+                )
+            else:
+                print(f"[main] {session_name} complete — no fills")
+        except Exception:
+            import traceback
+            print(f"[main] {session_name} supervisor crashed:")
+            traceback.print_exc()
+
+    t = threading.Thread(target=_run, name=f"session-{session_name}", daemon=True)
+    t.start()
+
+
 # ── SCHEDULER ─────────────────────────────────────────────────────────────────
 
 def start_scheduler(feed: BrokerFeed):
-    """Run EOD pipeline at 5:04 PM ET Mon–Thu; weekly review at 5:30 PM ET Fri."""
-    run_time    = f"{NY_CLOSE_HOUR:02d}:{EOD_RUN_OFFSET_MIN:02d}"
+    """
+    Full institutional schedule (all times ET, assumes machine clock = ET):
+
+    Mon–Fri  17:04   EOD pipeline → arms _ARMED_SETUPS
+    Mon–Thu  19:00   Asia session supervisor
+    Tue–Sat  01:00   London session supervisor   (next calendar day after EOD)
+    Tue–Sat  07:00   New York FX session
+    Tue–Sat  09:30   New York Equity session
+    Fri      17:30   Weekly review
+
+    Session threads are daemon threads — the scheduler loop remains unblocked.
+    Weekend gate inside launch_session() prevents Saturday from doing work.
+    """
+    eod_time    = f"{NY_CLOSE_HOUR:02d}:{EOD_RUN_OFFSET_MIN:02d}"   # "17:04"
     review_time = "17:30"
-    print(f"[main] Scheduler armed — EOD run at {run_time} ET Mon–Thu | Weekly review at {review_time} ET Fri")
-    schedule.every().monday.at(run_time).do(run_eod, feed=feed)
-    schedule.every().tuesday.at(run_time).do(run_eod, feed=feed)
-    schedule.every().wednesday.at(run_time).do(run_eod, feed=feed)
-    schedule.every().thursday.at(run_time).do(run_eod, feed=feed)
-    # Friday: run EOD first (same time), then weekly review 26 min later
-    schedule.every().friday.at(run_time).do(run_eod, feed=feed)
+
+    # ── EOD pipeline ─────────────────────────────────────────────────────────
+    for day in ("monday", "tuesday", "wednesday", "thursday", "friday"):
+        getattr(schedule.every(), day).at(eod_time).do(run_eod, feed=feed)
+
+    # ── Weekly review (Friday only) ───────────────────────────────────────────
     schedule.every().friday.at(review_time).do(run_weekly_review, feed=feed)
+
+    # ── Asia session  19:00 ET  Mon–Thu (same evening as EOD) ────────────────
+    for day in ("monday", "tuesday", "wednesday", "thursday"):
+        getattr(schedule.every(), day).at("19:00").do(
+            launch_session, session_name="ASIA", feed=feed
+        )
+
+    # ── London session  01:00 ET  Tue–Fri (early morning, after prior-day EOD)
+    for day in ("tuesday", "wednesday", "thursday", "friday"):
+        getattr(schedule.every(), day).at("01:00").do(
+            launch_session, session_name="LONDON", feed=feed
+        )
+
+    # ── New York FX session  07:00 ET  Tue–Fri ───────────────────────────────
+    for day in ("tuesday", "wednesday", "thursday", "friday"):
+        getattr(schedule.every(), day).at("07:00").do(
+            launch_session, session_name="NEW_YORK_FX", feed=feed
+        )
+
+    # ── New York Equity session  09:30 ET  Tue–Fri ───────────────────────────
+    for day in ("tuesday", "wednesday", "thursday", "friday"):
+        getattr(schedule.every(), day).at("09:30").do(
+            launch_session, session_name="NEW_YORK_EQ", feed=feed
+        )
+
+    print(
+        f"[main] Scheduler armed\n"
+        f"  EOD:        {eod_time} ET  Mon–Fri\n"
+        f"  Asia:       19:00 ET  Mon–Thu\n"
+        f"  London:     01:00 ET  Tue–Fri\n"
+        f"  NY FX:      07:00 ET  Tue–Fri\n"
+        f"  NY Equity:  09:30 ET  Tue–Fri\n"
+        f"  Review:     {review_time} ET  Fri"
+    )
 
     while True:
         schedule.run_pending()
