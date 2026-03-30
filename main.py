@@ -40,6 +40,13 @@ from acb_trader.db.session_tracker import (
     compute_account_metrics, log_discard,
 )
 from acb_trader.signals.weekly import build_weekly_template, build_weekly_review
+from acb_trader.models import DiscardedSetup
+
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed — fall back to OS-level env vars
 
 
 PAUSED_SETUPS_PATH = os.path.join(os.path.dirname(__file__), "paused_setups.json")
@@ -272,11 +279,53 @@ def run_eod(feed: BrokerFeed):
                 print(f"  {pair}: ERROR — {e}")
                 continue
 
-        # Rank basket
-        rank_basket(states, pairs)
+        # Rank basket — primary sort key is the 14-point setup score so the
+        # apex instrument is mathematically identified, not guessed from labels
+        basket_setups = [s for s in all_setups if s.pair in set(pairs)]
+        rank_basket(states, pairs, basket_setups)
 
     # ── Sort all setups by score ───────────────────────────────────────────────
     all_setups.sort(key=lambda s: s.score, reverse=True)
+
+    # ── One setup per correlated basket ───────────────────────────────────────
+    # Each basket is treated as a single instrument — all pairs within it move
+    # on the same underlying money flow.  Taking multiple USD-pair trades
+    # simultaneously is not more edge; it is the same trade repeated N times,
+    # multiplying correlated drawdown while violating the 1% risk mandate.
+    # Rule: keep the single highest-scoring setup per basket (already at the
+    # top after the score sort).  Discard every inferior setup in that basket.
+    _pair_to_basket: dict[str, str] = {
+        pair: basket
+        for basket, pairs in BASKETS.items()
+        for pair in pairs
+    }
+    _basket_claimed: set[str] = set()
+    _filtered_setups: list = []
+    for s in all_setups:
+        b = _pair_to_basket.get(s.pair)
+        if b is None or b not in _basket_claimed:
+            _filtered_setups.append(s)
+            if b:
+                _basket_claimed.add(b)
+        else:
+            _corr_discard = DiscardedSetup(
+                pair=s.pair, pattern=s.pattern, direction=s.direction,
+                score=s.score, reason="CORRELATED_BASKET_FILTERED",
+                discarded_at=datetime.now(ET),
+            )
+            discarded_log.append(_corr_discard)
+            log_discard(_corr_discard)
+            print(f"  {s.pair} {s.pattern} score={s.score} → CORRELATED_BASKET_FILTERED ({b})")
+    all_setups = _filtered_setups
+
+    # ── Promote basket apex to FIVE_STAR_SCALABLE ─────────────────────────────
+    # Every setup that survived the basket filter IS the highest-scoring
+    # instrument in its correlated group — it has already cleared MIN_SETUP_SCORE
+    # and beaten every peer on the 14-point engine.  Promote unconditionally to
+    # unlock the Tranche Protocol: 50% exit at T1 (stop → BE), 30% at T2,
+    # 20% trailing.  One great trade with maximum size; zero correlated copies.
+    for s in all_setups:
+        s.trade_type = "FIVE_STAR_SCALABLE"
 
     # ── Step 5: Alert ─────────────────────────────────────────────────────────
     print(f"\n── Results ──")

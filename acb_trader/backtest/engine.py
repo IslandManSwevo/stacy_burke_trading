@@ -343,8 +343,9 @@ class BacktestEngine:
                     daily_ohlcv=df_slice,
                     as_of=bar_date,
                     ema_coil=ema_coil,
-                    skip_stop_gate=True,        # lift MAX_STOP_PIPS ceiling
-                    sim_stop_pips={},           # disabled: scoring-only sim distorts selection
+                    skip_stop_gate=True,        # lift MAX_STOP_PIPS ceiling for wider discovery
+                    skip_coil_gate=True,        # D1 coil proxy is data-window-sensitive; coil status stored in setup.ema_coil_confirmed but doesn't block
+                    sim_stop_pips=BACKTEST_SIMULATED_STOP_PIPS,  # scoring-only: restored after score_setup()
                 )
                 # Filter out "Monitor Only" patterns
                 setups = [s for s in setups if s.pattern not in MONITOR_ONLY_PATTERNS]

@@ -13,6 +13,7 @@ RISK_PER_TRADE_PCT   = 0.01    # 1% account risk per trade
 MIN_TARGET_PIPS      = 50      # Minimum distance to Target 1 (all instruments)
 FIVE_STAR_SCORE      = 99      # Disabled: FIVE_STAR hurts at WR<46%. All trades SESSION_TRADE.
 MIN_SETUP_SCORE      = 7       # Optimizer-confirmed optimal threshold
+MIN_SETUP_RR         = 2.0    # Minimum planned R:R to T1 — rejects setups below 2:1 (e.g. R:R=1.4 low-qual entries)
 ATR_PERIOD           = 14
 
 # ── IFB VOLUME EXPANSION ─────────────────────────────────────────────────────

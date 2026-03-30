@@ -47,6 +47,7 @@ def detect_setups(
     as_of: Optional[date] = None,
     m15_ohlcv: Optional[pd.DataFrame] = None,
     skip_stop_gate: bool = False,
+    skip_coil_gate: bool = False,
     sim_stop_pips: Optional[dict] = None,
 ) -> tuple[list[Setup], list[DiscardedSetup]]:
     """
@@ -55,7 +56,13 @@ def detect_setups(
 
     skip_stop_gate=True: used by the backtester to suppress the STOP_TOO_WIDE
     discard so that wide-stop setups are returned as Setup objects, allowing
-    the engine's simulated-stop override to re-price them before scoring.
+    the engine\'s simulated-stop override to re-price them before scoring.
+    skip_coil_gate=True: used by the backtester to bypass the NO_HTF_COIL block.
+    The daily EMA coil proxy is a rough D1 approximation of the live H4 coil;
+    it is data-window-sensitive and causes backtest instability when the window
+    shifts by a single bar.  With skip_coil_gate=True the coil status is still
+    computed and stored in setup.ema_coil_confirmed, but does not block setups.
+    sim_stop_pips: dict mapping INSTRUMENT_CLASS \u2192 simulated stop in pips.
     sim_stop_pips: dict mapping INSTRUMENT_CLASS → simulated stop in pips.
     When provided, stops wider than 1.5× the sim value are overridden BEFORE
     scoring so tight_stop (+2) and rr_3to1 (+2) bonuses fire correctly.
@@ -146,7 +153,7 @@ def detect_setups(
         # Discard setups where T1 is NOT in the profit direction from entry.
         # Occurs with MFB / IB_EXTREME when today's close has already pushed
         # past the historical price level used as T1 (e.g. a SHORT where
-        # t1 = monday_low but today_close < monday_low → t1 > entry_price).
+        # t1 = or_mid but today_close < or_mid → t1 > entry_price for SHORT).
         # Without this guard, the exit engine fires FULL_TARGET_CLOSE
         # on bar 1 in the LOSS direction, producing e.g. -6.45 R.
         if setup.target_1 is not None:
@@ -158,6 +165,22 @@ def detect_setups(
                 discarded.append(_discard(pair, setup.pattern, setup.direction,
                                           0, "T1_WRONG_DIRECTION"))
                 continue
+
+        # ── MINIMUM PLANNED R:R FILTER ─────────────────────────────────────────
+        # Rejects setups where the planned T1 distance < cfg.MIN_SETUP_RR × risk.
+        # Price-distance ratio is identical to pip ratio (pip_size cancels out),
+        # so no unit conversion is needed.
+        # Catches low-quality entries that pass the score gate via non-R:R bonuses
+        # (e.g. breakout_state, anchor_confluence) but have structurally poor R:R.
+        if setup.target_1 is not None and setup.stop_price is not None:
+            _t1_dist  = abs(setup.target_1 - setup.entry_price)
+            _risk_dist = abs(setup.stop_price - setup.entry_price)
+            if _risk_dist > 0:
+                _planned_rr = _t1_dist / _risk_dist
+                if _planned_rr < cfg.MIN_SETUP_RR:
+                    discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                              0, "RR_TOO_LOW"))
+                    continue
 
         # ── BACKTEST SIMULATED STOP — SCORING ONLY ──────────────────────────────
         # Daily bars produce wide stops (40–300 pips from the day's H/L range).
@@ -267,6 +290,25 @@ def detect_setups(
         if _is_diddle(setup, template):
             discarded.append(_discard(pair, setup.pattern, setup.direction,
                                       setup.score, "DIDDLE_FILTERED"))
+            continue
+
+        # ── HARD COIL GATE ────────────────────────────────────────────────────
+        # No H4/daily EMA coil confirmed at EOD → no trade. Period.
+        # Without measurable compression on the higher timeframe, potential
+        # energy has not built, there is no Deathline, and the surgical 20-pip
+        # stop has no structural wall to hide behind.
+        # COIL_FORCE_PROMOTE_PATTERNS (FRD/FGD/MFB) are exempt: the EOD H4
+        # proxy is not their confirmation signal — the live 15-min coil formed
+        # at the session open is. The session supervisor gates them instead.
+        # skip_coil_gate=True: backtester bypass — the D1 EMA coil proxy is
+        # sensitive to the rolling 1000-bar window; single-bar shifts flip it
+        # on/off for historical setups. Coil status is still stored in
+        # setup.ema_coil_confirmed but does not block in backtest mode.
+        if (not skip_coil_gate
+                and not setup.ema_coil_confirmed
+                and setup.pattern not in cfg.COIL_FORCE_PROMOTE_PATTERNS):
+            discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                      setup.score, "NO_HTF_COIL"))
             continue
 
         # Litmus Test for Professional Size (100-Lot Test)
@@ -992,7 +1034,8 @@ def _detect_ib_extreme(
     # Prefer the direction with a stronger rejection candle
     if tested_high and closed_below_high:
         direction = "SHORT"
-        # Rejection quality: close should be in lower half of today's range
+        # Rejection quality: close should be in lower half of today's range.
+        # Ensures a genuine false-break: price tested OR high but bulls failed to hold it.
         today_range = today_high - today_low
         if today_range > 0:
             close_pct = (today_close - today_low) / today_range

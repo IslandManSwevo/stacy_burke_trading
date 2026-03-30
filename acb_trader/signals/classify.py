@@ -7,7 +7,7 @@ from __future__ import annotations
 import pandas as pd
 from datetime import datetime
 from acb_trader.config import ET, ATR_PERIOD
-from acb_trader.db.models import MarketState, TrapAnalysis
+from acb_trader.db.models import MarketState, TrapAnalysis, Setup
 from acb_trader.data.levels import (
     compute_atr, compute_close_streak, compute_day_break_counter,
     get_pip_size, price_to_pips
@@ -193,23 +193,40 @@ def _detect_trap(
 def rank_basket(
     classifications: dict[str, MarketState],
     basket: list[str],
+    setups: list[Setup] | None = None,
 ) -> list[str]:
-    """Return basket pairs sorted by setup quality. RANGING excluded."""
+    """
+    Rank basket pairs. Primary sort key: 14-point setup score (when setups are
+    provided). Tie-break: state priority (BREAKOUT > TRENDING) then close_streak
+    magnitude. RANGING pairs with no setup are excluded.
+
+    basket_rank == 1 is the apex instrument — the caller must discard every
+    other correlated setup in the basket to enforce the 1% risk mandate.
+    """
     PRIORITY = {"BREAKOUT": 3, "TRENDING": 2, "RANGING": 0}
     SUBSTATE_BONUS = {"BREAKOUT_DAY_2": 1, "TRENDING_BACK_SIDE": 1}
+
+    # Best 14-point score per pair — 0 when no valid setup was detected
+    score_map: dict[str, int] = {}
+    if setups:
+        for s in setups:
+            if s.pair in basket:
+                score_map[s.pair] = max(score_map.get(s.pair, 0), s.score)
 
     ranked = []
     for pair in basket:
         ms = classifications.get(pair)
         if ms is None or ms.state == "RANGING":
             continue
-        score = PRIORITY.get(ms.state, 0) + SUBSTATE_BONUS.get(ms.substate, 0)
-        ranked.append((pair, score, abs(ms.close_streak)))
+        state_priority = PRIORITY.get(ms.state, 0) + SUBSTATE_BONUS.get(ms.substate, 0)
+        setup_score = score_map.get(pair, 0)
+        ranked.append((pair, setup_score, state_priority, abs(ms.close_streak)))
 
-    ranked.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    # Primary: 14-point setup score; tie-break: state priority then streak depth
+    ranked.sort(key=lambda x: (x[1], x[2], x[3]), reverse=True)
 
     result = []
-    for i, (pair, _, _) in enumerate(ranked):
+    for i, (pair, _, _, _) in enumerate(ranked):
         classifications[pair].basket_rank = i + 1
         result.append(pair)
     return result
