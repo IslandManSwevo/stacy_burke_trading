@@ -5,7 +5,7 @@ All order ops go through this module. Never call MT5 directly from other modules
 
 from __future__ import annotations
 from datetime import datetime
-from acb_trader.config import ET
+from acb_trader.config import ET, NEWS_SETTLE_MINUTES
 from acb_trader.data.calendar import is_in_news_settle_window
 from acb_trader.db.models import Setup
 
@@ -40,7 +40,7 @@ class MT5Client:
         """
         now = datetime.now(ET)
         if is_in_news_settle_window(setup.pair, now):
-            msg = (f"BLOCKED: {setup.pair} is inside the 30-min post-MRN "
+            msg = (f"BLOCKED: {setup.pair} is inside the {NEWS_SETTLE_MINUTES}-min post-MRN "
                    f"settle window — order rejected to protect capital")
             print(f"[orders] {msg}")
             return OrderResult(False, message=msg)
@@ -85,7 +85,7 @@ class MT5Client:
         """
         now = datetime.now(ET)
         if is_in_news_settle_window(setup.pair, now):
-            msg = (f"BLOCKED: {setup.pair} inside 30-min MRN settle window "
+            msg = (f"BLOCKED: {setup.pair} inside {NEWS_SETTLE_MINUTES}-min MRN settle window "
                    f"— market order rejected")
             print(f"[orders] {msg}")
             return OrderResult(False, message=msg)

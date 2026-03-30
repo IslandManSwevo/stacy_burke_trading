@@ -73,18 +73,20 @@ class ScoreBreakdown:
         """Human-readable breakdown for Telegram / logs."""
         rows = []
         mapping = [
-            ("Wed/Thu signal day",   self.wed_thu_signal),
-            ("BREAKOUT state",       self.breakout_state),
-            ("Tight stop ≤0.5×ATR", self.tight_stop),
-            ("R:R ≥ 3:1",           self.rr_3to1),
+            ("Wed/Thu signal day",    self.wed_thu_signal),
+            ("BREAKOUT state",        self.breakout_state),
+            ("Tight stop ≤0.5×ATR",   self.tight_stop),
+            ("R:R ≥ 3:1",             self.rr_3to1),
             ("2+ anchor confluences", self.anchor_confluence),
-            ("EMA coil (4H)",        self.ema_coil),
-            ("Near HCOW/LCOW",       self.near_hcow_lcow),
-            ("Pattern bonus",        self.pattern_bonus),
-            ("PARA level stack",     self.para_level_stack),            ("FRD/FGD structural",   self.frd_fgd_structural),
+            ("EMA coil (4H)",         self.ema_coil),
+            ("Near HCOW/LCOW",        self.near_hcow_lcow),
+            ("Pattern bonus",         self.pattern_bonus),
+            ("PARA level stack",      self.para_level_stack),
+            ("FRD/FGD structural",    self.frd_fgd_structural),
             ("MFB structural",        self.mfb_structural),
-            ("3-box exhaustion",      self.three_box_exhaustion),            ("Backside phase",       self.backside_phase),
-            ("3HC/3LC SIGNAL_DAY",   self.signal_day_label),
+            ("3-box exhaustion",      self.three_box_exhaustion),
+            ("Backside phase",        self.backside_phase),
+            ("3HC/3LC SIGNAL_DAY",    self.signal_day_label),
         ]
         for label, pts in mapping:
             if pts:

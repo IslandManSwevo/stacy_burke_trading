@@ -13,19 +13,13 @@ import os
 from datetime import datetime, timedelta, date
 from typing import Optional
 
-from acb_trader.config import ET, NEWS_SETTLE_MINUTES
-from acb_trader.data.feed import BrokerFeed
-from acb_trader.data.levels import (
-    snap_to_quarter, snap_stop_beyond, get_pip_size, price_to_pips,
-)
+from acb_trader.config import ET, NEWS_SETTLE_MINUTES, PAUSED_SETUPS_PATH
 from acb_trader.execution.coil import wait_for_ema_coil, check_5min_entry
 from acb_trader.execution.orders import OrderManager
+from acb_trader.execution.sizing import calculate_position_size
 from acb_trader.db.models import Setup
 from acb_trader.signals.patterns import get_rr_floor
-
-PAUSED_SETUPS_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "paused_setups.json"
-)
+from acb_trader.utils.math import snap_to_quarter, snap_stop_beyond, price_to_pips, get_pip_size
 
 
 def _load_paused_setups() -> list[dict]:
@@ -155,6 +149,13 @@ def check_paused_setups(feed: BrokerFeed, order_mgr: Optional[OrderManager] = No
             remaining.append(entry)
             continue
 
+        # Parse signal_date with fallback
+        try:
+            signal_date = date.fromisoformat(entry["signal_date"])
+        except (KeyError, ValueError):
+            print(f"[news_rearm] {pair} {pattern}: invalid signal_date — skipping")
+            continue
+
         # Build re-armed Setup and place order
         setup = Setup(
             pair=pair,
@@ -168,21 +169,27 @@ def check_paused_setups(feed: BrokerFeed, order_mgr: Optional[OrderManager] = No
             risk_pips=risk_pips,
             score=int(entry.get("score", 0)),
             trade_type=entry.get("trade_type", "SESSION_TRADE"),
-            signal_date=date.fromisoformat(entry["signal_date"]),
+            signal_date=signal_date,
             entry_date=entry_date,
             ema_coil_confirmed=True,
             expires=entry_date,
             notes=f"{pattern} re-armed post-news | 5m coil stop | R:R={rr:.2f}",
         )
 
+        # Compute lot size based on account and risk
+        try:
+            acc = feed.get_account()
+            lot_size = calculate_position_size(acc["balance"], setup.entry_price, setup.stop_price, setup.pair)
+        except Exception:
+            lot_size = 0.01  # Fallback minimum
+
         if order_mgr is not None:
-            lot_size = float(entry.get("lot_size", 0.01))
             result = order_mgr.place_limit_order(setup, lot_size)
             print(f"[news_rearm] {pair} {pattern}: ORDER PLACED ticket={result.ticket} "
-                  f"entry={new_entry} stop={new_stop} R:R={rr:.2f}")
+                  f"entry={new_entry} stop={new_stop} lot={lot_size} R:R={rr:.2f}")
         else:
             print(f"[news_rearm] {pair} {pattern}: RE-ARMED (dry-run) "
-                  f"entry={new_entry} stop={new_stop} R:R={rr:.2f}")
+                  f"entry={new_entry} stop={new_stop} lot={lot_size} R:R={rr:.2f}")
 
         re_armed.append(setup)
 

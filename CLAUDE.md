@@ -21,7 +21,7 @@ pytest acb_trader/tests/test_patterns_and_scoring.py -v
 python -m acb_trader.backtest.run_backtest --data historical_2023_2024.csv
 ```
 
-`MetaTrader5` is Windows-only. On any other platform, `BrokerFeed` automatically falls back to paper mode (mock data, stdout alerts).
+`MetaTrader5` is Windows-only. While `BrokerFeed` attempts to use it on Windows, it will also detect its absence or a failure to import and automatically fall back to paper mode (mock data, stdout alerts). On any other platform (Linux/macOS), the fallback to paper mode is also automatic.
 
 ## Architecture
 
@@ -29,7 +29,7 @@ The system is an end-of-day (EOD) automated trading bot implementing the Stacy B
 
 ### EOD Pipeline (triggered at 5:04 PM ET)
 
-```
+```text
 DATA LAYER         MT5 broker or CSV fallback
       ↓
 SIGNAL LAYER       classify → watchlist → weekly template → detect setups
@@ -44,7 +44,7 @@ NOTIFICATIONS      Telegram briefings, armed alerts, state changes, debriefs
 ### Key files
 
 | File | Role |
-|------|------|
+| --- | --- |
 | `main.py` | Entry point; `run_eod()` orchestrates the full pipeline |
 | `acb_trader/config.py` | **Single source of truth** for all constants — never hardcode values in modules |
 | `acb_trader/models.py` | All dataclasses: `Setup`, `MarketState`, `WeeklyTemplate`, `AccountState`, `TradeRecord` |

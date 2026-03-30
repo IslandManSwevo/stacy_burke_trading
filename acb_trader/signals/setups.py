@@ -97,232 +97,231 @@ def detect_setups(
     # AFTER detection.  Temporarily raise the MAX_STOP_PIPS ceiling to 99999
     # so _valid_stop() passes all setups through; restored in the finally block.
     _max_stop_backup: dict | None = None
-    if skip_stop_gate:
-        _max_stop_backup = dict(cfg.MAX_STOP_PIPS)
-        cfg.MAX_STOP_PIPS.update({k: (v[0], 99999) for k, v in cfg.MAX_STOP_PIPS.items()})
+    try:
+        if skip_stop_gate:
+            _max_stop_backup = dict(cfg.MAX_STOP_PIPS)
+            cfg.MAX_STOP_PIPS.update({k: (v[0], 99999) for k, v in cfg.MAX_STOP_PIPS.items()})
 
-    detectors = [
-        _detect_pump_coil_dump,
-        _detect_first_red_day,
-        _detect_inside_false_break,
-        _detect_parabolic_reversal,
-        _detect_monday_false_break,
-        _detect_low_hanging_fruit,
-        _detect_ib_extreme,
-    ]
+        detectors = [
+            _detect_pump_coil_dump,
+            _detect_first_red_day,
+            _detect_inside_false_break,
+            _detect_parabolic_reversal,
+            _detect_monday_false_break,
+            _detect_low_hanging_fruit,
+            _detect_ib_extreme,
+        ]
 
-    for fn in detectors:
-        extra = {"m15_ohlcv": m15_ohlcv} if fn is _detect_first_red_day else {}
-        result = fn(pair, state, template, daily_ohlcv, atr14, as_of, **extra)
-        if result is None:
-            continue
-        setup, reason = result
-        if reason:
-            discarded.append(_discard(pair, setup.pattern if setup else "?",
-                                      "?", 0, reason))
-            continue
-        if setup is None:
-            continue
-
-        # ── WEEKLY PHASE GATE (structural, not calendar) ─────────────────────
-        # entry_bias is now derived from structural day count (close_streak),
-        # not rigid calendar weekday.  FRONT_SIDE (streak ≤ 2) = trap still
-        # building; BACK_SIDE (streak ≥ 3 or reversed) = liquidation phase.
-        #
-        # Reversal patterns (PCD, FRD/FGD, Parabolic) remain blocked on
-        # FRONT_SIDE: you cannot trap volume when the market is still actively
-        # building the trap.  Each detector also has its own streak >= 3 gate.
-        #
-        # LHF is now UNBLOCKED all week (FRONT_SIDE_PATTERNS is empty) —
-        # once the Back Side reversal fires, Thu/Fri LHF continuation rides
-        # the explosive liquidation move.
-        if entry_bias == "FRONT_SIDE" and setup.pattern in cfg.BACK_SIDE_PATTERNS:
-            discarded.append(_discard(pair, setup.pattern, setup.direction,
-                                      0, "FRONT_SIDE_NO_REVERSALS"))
-            continue
-        if entry_bias == "BACK_SIDE" and setup.pattern in cfg.FRONT_SIDE_PATTERNS:
-            discarded.append(_discard(pair, setup.pattern, setup.direction,
-                                      0, "BACK_SIDE_NO_CONTINUATIONS"))
-            continue
-        if entry_bias == "NO_ENTRY":
-            discarded.append(_discard(pair, setup.pattern, setup.direction,
-                                      0, "NO_ENTRY_DAY"))
-            continue
-
-        # ── T1 DIRECTION GUARD ─────────────────────────────────────────────────
-        # Discard setups where T1 is NOT in the profit direction from entry.
-        # Occurs with MFB / IB_EXTREME when today's close has already pushed
-        # past the historical price level used as T1 (e.g. a SHORT where
-        # t1 = or_mid but today_close < or_mid → t1 > entry_price for SHORT).
-        # Without this guard, the exit engine fires FULL_TARGET_CLOSE
-        # on bar 1 in the LOSS direction, producing e.g. -6.45 R.
-        if setup.target_1 is not None:
-            _t1_ok = (
-                (setup.direction == "SHORT" and setup.target_1 < setup.entry_price) or
-                (setup.direction == "LONG"  and setup.target_1 > setup.entry_price)
-            )
-            if not _t1_ok:
-                discarded.append(_discard(pair, setup.pattern, setup.direction,
-                                          0, "T1_WRONG_DIRECTION"))
+        for fn in detectors:
+            extra = {"m15_ohlcv": m15_ohlcv} if fn is _detect_first_red_day else {}
+            result = fn(pair, state, template, daily_ohlcv, atr14, as_of, **extra)
+            if result is None:
+                continue
+            setup, reason = result
+            if reason:
+                discarded.append(_discard(pair, setup.pattern if setup else "?",
+                                          "?", 0, reason))
+                continue
+            if setup is None:
                 continue
 
-        # ── MINIMUM PLANNED R:R FILTER ─────────────────────────────────────────
-        # Rejects setups where the planned T1 distance < cfg.MIN_SETUP_RR × risk.
-        # Price-distance ratio is identical to pip ratio (pip_size cancels out),
-        # so no unit conversion is needed.
-        # Catches low-quality entries that pass the score gate via non-R:R bonuses
-        # (e.g. breakout_state, anchor_confluence) but have structurally poor R:R.
-        if setup.target_1 is not None and setup.stop_price is not None:
-            _t1_dist  = abs(setup.target_1 - setup.entry_price)
-            _risk_dist = abs(setup.stop_price - setup.entry_price)
-            if _risk_dist > 0:
-                _planned_rr = _t1_dist / _risk_dist
-                if _planned_rr < cfg.MIN_SETUP_RR:
+            # ── WEEKLY PHASE GATE (structural, not calendar) ─────────────────────
+            # entry_bias is now derived from structural day count (close_streak),
+            # not rigid calendar weekday.  FRONT_SIDE (streak ≤ 2) = trap still
+            # building; BACK_SIDE (streak ≥ 3 or reversed) = liquidation phase.
+            #
+            # Reversal patterns (PCD, FRD/FGD, Parabolic) remain blocked on
+            # FRONT_SIDE: you cannot trap volume when the market is still actively
+            # building the trap.  Each detector also has its own streak >= 3 gate.
+            #
+            # LHF is now UNBLOCKED all week (FRONT_SIDE_PATTERNS is empty) —
+            # once the Back Side reversal fires, Thu/Fri LHF continuation rides
+            # the explosive liquidation move.
+            if entry_bias == "FRONT_SIDE" and setup.pattern in cfg.BACK_SIDE_PATTERNS:
+                discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                          0, "FRONT_SIDE_NO_REVERSALS"))
+                continue
+            if entry_bias == "BACK_SIDE" and setup.pattern in cfg.FRONT_SIDE_PATTERNS:
+                discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                          0, "BACK_SIDE_NO_CONTINUATIONS"))
+                continue
+            if entry_bias == "NO_ENTRY":
+                discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                          0, "NO_ENTRY_DAY"))
+                continue
+
+            # ── T1 DIRECTION GUARD ─────────────────────────────────────────────────
+            # Discard setups where T1 is NOT in the profit direction from entry.
+            # Occurs with MFB / IB_EXTREME when today's close has already pushed
+            # past the historical price level used as T1 (e.g. a SHORT where
+            # t1 = or_mid but today_close < or_mid → t1 > entry_price for SHORT).
+            # Without this guard, the exit engine fires FULL_TARGET_CLOSE
+            # on bar 1 in the LOSS direction, producing e.g. -6.45 R.
+            if setup.target_1 is not None:
+                _t1_ok = (
+                    (setup.direction == "SHORT" and setup.target_1 < setup.entry_price) or
+                    (setup.direction == "LONG"  and setup.target_1 > setup.entry_price)
+                )
+                if not _t1_ok:
                     discarded.append(_discard(pair, setup.pattern, setup.direction,
-                                              0, "RR_TOO_LOW"))
+                                              0, "T1_WRONG_DIRECTION"))
                     continue
 
-        # ── BACKTEST SIMULATED STOP — SCORING ONLY ──────────────────────────────
-        # Daily bars produce wide stops (40–300 pips from the day's H/L range).
-        # Live entries use a 15-min EMA coil with 15–25 pip stops, which earns
-        # tight_stop (+2) and rr_3to1 (+2) scoring bonuses.  We apply the sim
-        # stop TEMPORARILY so those bonuses fire correctly, then RESTORE the
-        # original stop/risk before returning the setup.  The exit engine and
-        # R:R reporting therefore use the true daily-bar stop geometry — giving
-        # an honest picture of whether the setup *direction* is profitable.
-        _sim_restore: tuple | None = None   # (original_stop_price, original_risk_pips)
-        if sim_stop_pips:
-            _cls = cfg.INSTRUMENT_CLASS.get(pair, "CURRENCIES")
-            _sim_stop = sim_stop_pips.get(_cls)
-            if _sim_stop and setup.risk_pips > _sim_stop * 1.5:
-                _pip_sz = get_pip_size(pair)
-                _sim_restore = (setup.stop_price, setup.risk_pips)
-                if setup.direction == "SHORT":
-                    setup.stop_price = setup.entry_price + _sim_stop * _pip_sz
-                else:
-                    setup.stop_price = setup.entry_price - _sim_stop * _pip_sz
-                setup.risk_pips = _sim_stop
-                setup.notes += f" | [sim-score] {_sim_restore[1]:.0f}->{_sim_stop} pips"
+            # ── MINIMUM PLANNED R:R FILTER ─────────────────────────────────────────
+            # Rejects setups where the planned T1 distance < cfg.MIN_SETUP_RR × risk.
+            # Price-distance ratio is identical to pip ratio (pip_size cancels out),
+            # so no unit conversion is needed.
+            # Catches low-quality entries that pass the score gate via non-R:R bonuses
+            # (e.g. breakout_state, anchor_confluence) but have structurally poor R:R.
+            if setup.target_1 is not None and setup.stop_price is not None:
+                _t1_dist  = abs(setup.target_1 - setup.entry_price)
+                _risk_dist = abs(setup.stop_price - setup.entry_price)
+                if _risk_dist == 0:
+                    discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                              0, "RR_ZERO"))
+                    continue
+                if _risk_dist > 0:
+                    _planned_rr = _t1_dist / _risk_dist
+                    if _planned_rr < cfg.MIN_SETUP_RR:
+                        discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                                  0, "RR_TOO_LOW"))
+                        continue
 
-        # Score and classify
-        prior_streak = compute_close_streak(daily_ohlcv.iloc[:-1])
-        from acb_trader.signals._scoring import score_setup
-        bd = score_setup(setup, state, template, ema_coil)
-        if setup.pattern == "INSIDE_FALSE_BREAK":
-            bd.total = _apply_ifb_volume_bonus(daily_ohlcv, bd.total)
-        setup.score = bd.total
-        setup.breakdown = bd
-        setup.ema_coil_confirmed = ema_coil
+            # ── BACKTEST SIMULATED STOP — SCORING ONLY ──────────────────────────────
+            # Daily bars produce wide stops (40–300 pips from the day's H/L range).
+            # Live entries use a 15-min EMA coil with 15–25 pip stops, which earns
+            # tight_stop (+2) and rr_3to1 (+2) scoring bonuses.  We apply the sim
+            # stop TEMPORARILY so those bonuses fire correctly, then RESTORE the
+            # original stop/risk before returning the setup.  The exit engine and
+            # R:R reporting therefore use the true daily-bar stop geometry — giving
+            # an honest picture of whether the setup *direction* is profitable.
+            _sim_restore: tuple | None = None   # (original_stop_price, original_risk_pips)
+            if sim_stop_pips:
+                _cls = cfg.INSTRUMENT_CLASS.get(pair, "CURRENCIES")
+                _sim_stop = sim_stop_pips.get(_cls)
+                if _sim_stop and setup.risk_pips > _sim_stop * 1.5:
+                    _pip_sz = get_pip_size(pair)
+                    _sim_restore = (setup.stop_price, setup.risk_pips)
+                    if setup.direction == "SHORT":
+                        setup.stop_price = setup.entry_price + _sim_stop * _pip_sz
+                    else:
+                        setup.stop_price = setup.entry_price - _sim_stop * _pip_sz
 
-        # Restore original stop geometry after scoring so exit engine is honest
-        if _sim_restore is not None:
-            setup.stop_price, setup.risk_pips = _sim_restore
+                    setup.notes += f" | [sim-score] {_sim_restore[1]:.0f}->{_sim_stop} pips"
 
-        # ── THREE-BOX GRID ANALYSIS ──────────────────────────────────────────────
-        # Map institutional 25-pip grid, project 3-box exhaustion zone, and
-        # annotate the setup.  ThreeBoxAnalysis is stashed on the setup so the
-        # scoring pass can read it (+2 exhaustion bonus when at_exhaustion==True).
-        try:
-            _streak_for_anchor = abs(compute_close_streak(daily_ohlcv.iloc[:-1]))
-            _anchor_dir = "BEARISH" if setup.direction == "SHORT" else "BULLISH"
-            _anchor = find_breakout_anchor(
-                setup.pair, daily_ohlcv, _anchor_dir, _streak_for_anchor
-            )
-            _current_price = setup.entry_price
-            _tba = project_three_boxes(
-                setup.pair, _anchor, _anchor_dir, current_price=_current_price
-            )
-            setup._three_box_analysis = _tba
+            # ── THREE-BOX GRID ANALYSIS ──────────────────────────────────────────────
+            # Map institutional 25-pip grid, project 3-box exhaustion zone, and
+            # annotate the setup.  ThreeBoxAnalysis is stashed on the setup so the
+            # scoring pass can read it (+2 exhaustion bonus when at_exhaustion==True).
+            try:
+                _streak_for_anchor = abs(compute_close_streak(daily_ohlcv.iloc[:-1]))
+                _anchor_dir = "BEARISH" if setup.direction == "SHORT" else "BULLISH"
+                _anchor = find_breakout_anchor(
+                    setup.pair, daily_ohlcv, _anchor_dir, _streak_for_anchor
+                )
+                _current_price = setup.entry_price
+                _tba = project_three_boxes(
+                    setup.pair, _anchor, _anchor_dir, current_price=_current_price
+                )
+                setup._three_box_analysis = _tba
 
-            # Refine T3 using HTF three-level projection (grid-snapped)
-            _ref = compute_three_box_targets(
-                setup.pair, setup.entry_price, setup.direction, _anchor
-            )
-            if _ref:
-                _t1_r, _t2_r, _t3_r = _ref
-                # Only set T3 — T1/T2 are pattern-specific and already calibrated
-                if _t3_r is not None:
-                    if setup.direction == "SHORT" and _t3_r < setup.entry_price:
-                        setup.target_3 = snap_to_quarter(_t3_r, setup.pair)
-                    elif setup.direction == "LONG" and _t3_r > setup.entry_price:
-                        setup.target_3 = snap_to_quarter(_t3_r, setup.pair)
+                # Refine T3 using HTF three-level projection (grid-snapped)
+                _ref = compute_three_box_targets(
+                    setup.pair, setup.entry_price, setup.direction, _anchor
+                )
+                if _ref:
+                    _t1_r, _t2_r, _t3_r = _ref
+                    # Only set T3 — T1/T2 are pattern-specific and already calibrated
+                    if _t3_r is not None:
+                        if setup.direction == "SHORT" and _t3_r < setup.entry_price:
+                            setup.target_3 = snap_to_quarter(_t3_r, setup.pair)
+                        elif setup.direction == "LONG" and _t3_r > setup.entry_price:
+                            setup.target_3 = snap_to_quarter(_t3_r, setup.pair)
 
-            setup.notes = _annotate_3box(setup.notes, _tba)
-        except Exception:
-            setup._three_box_analysis = None  # grid analysis non-fatal
+                setup.notes = _annotate_3box(setup.notes, _tba)
+            except Exception:
+                setup._three_box_analysis = None  # grid analysis non-fatal
 
-        # Re-score with three-box context now attached
-        bd = score_setup(setup, state, template, ema_coil)
-        if setup.pattern == "INSIDE_FALSE_BREAK":
-            bd.total = _apply_ifb_volume_bonus(daily_ohlcv, bd.total)
-        setup.score = bd.total
-        setup.breakdown = bd
+            # Score and classify with three-box context now attached
+            prior_streak = compute_close_streak(daily_ohlcv.iloc[:-1])
+            from acb_trader.signals._scoring import score_setup
+            setup.ema_coil_confirmed = ema_coil
+            bd = score_setup(setup, state, template, ema_coil)
+            if setup.pattern == "INSIDE_FALSE_BREAK":
+                bd.total = _apply_ifb_volume_bonus(daily_ohlcv, bd.total)
+            setup.score = bd.total
+            setup.breakdown = bd
 
-        setup.trade_type = "FIVE_STAR_SCALABLE" if setup.score >= cfg.FIVE_STAR_SCORE else "SESSION_TRADE"
+            # Restore original stop geometry after scoring so exit engine is honest
+            if _sim_restore is not None:
+                setup.stop_price, setup.risk_pips = _sim_restore
 
-        # ── EMA COIL FORCE-PROMOTE ────────────────────────────────────────────────
-        # A confirmed 15-min tight EMA coil at the weekly extreme is the absolute
-        # ground truth of trapped-volume compression.  All three EMAs (9/20/50)
-        # converging within 0.5×ATR14 for 3+ consecutive bars means potential
-        # energy is fully loaded — the algorithm must execute, not re-score.
-        # Action: set floor=0 (bypass score gate) and force-promote to FIVE_STAR.
-        if setup.ema_coil_confirmed and setup.pattern in cfg.COIL_FORCE_PROMOTE_PATTERNS:
-            setup.trade_type = "FIVE_STAR_SCALABLE"
-            floor = 0   # bypass MIN_SETUP_SCORE entirely
-            setup.notes += " | ⚡ EMA Coil Force-Promoted"
-        # Scoring floor — per-pattern overrides for patterns whose discarded trades show
-        # higher WR than accepted trades (scoring inversion confirmed in backtest analysis).
-        # IFB discards: 67% WR; MFB discards: 61% WR — both above MIN_SETUP_SCORE=7 accepted trades.
-        # Lowering both to 5 captures high-quality structural setups the score mistakenly rejected.
-        elif setup.pattern in ("INSIDE_FALSE_BREAK", "MONDAY_FALSE_BREAK"):
-            floor = 5
-        else:
-            floor = cfg.MIN_SETUP_SCORE
-        if setup.score < floor:
-            d = _discard(pair, setup.pattern, setup.direction, setup.score, "BELOW_MIN_SCORE")
-            # Capture price levels so discard_analysis() can simulate would_have_hit_t1
-            d.entry_price = setup.entry_price
-            d.stop_price  = setup.stop_price
-            d.target_1    = setup.target_1
-            discarded.append(d)
-            continue
-            
-        if _is_diddle(setup, template):
-            discarded.append(_discard(pair, setup.pattern, setup.direction,
-                                      setup.score, "DIDDLE_FILTERED"))
-            continue
+            setup.trade_type = "FIVE_STAR_SCALABLE" if setup.score >= cfg.FIVE_STAR_SCORE else "SESSION_TRADE"
 
-        # ── HARD COIL GATE ────────────────────────────────────────────────────
-        # No H4/daily EMA coil confirmed at EOD → no trade. Period.
-        # Without measurable compression on the higher timeframe, potential
-        # energy has not built, there is no Deathline, and the surgical 20-pip
-        # stop has no structural wall to hide behind.
-        # COIL_FORCE_PROMOTE_PATTERNS (FRD/FGD/MFB) are exempt: the EOD H4
-        # proxy is not their confirmation signal — the live 15-min coil formed
-        # at the session open is. The session supervisor gates them instead.
-        # skip_coil_gate=True: backtester bypass — the D1 EMA coil proxy is
-        # sensitive to the rolling 1000-bar window; single-bar shifts flip it
-        # on/off for historical setups. Coil status is still stored in
-        # setup.ema_coil_confirmed but does not block in backtest mode.
-        if (not skip_coil_gate
-                and not setup.ema_coil_confirmed
-                and setup.pattern not in cfg.COIL_FORCE_PROMOTE_PATTERNS):
-            discarded.append(_discard(pair, setup.pattern, setup.direction,
-                                      setup.score, "NO_HTF_COIL"))
-            continue
+            # ── EMA COIL FORCE-PROMOTE ────────────────────────────────────────────────
+            # A confirmed 15-min tight EMA coil at the weekly extreme is the absolute
+            # ground truth of trapped-volume compression.  All three EMAs (9/20/50)
+            # converging within 0.5×ATR14 for 3+ consecutive bars means potential
+            # energy is fully loaded — the algorithm must execute, not re-score.
+            # Action: set floor=0 (bypass score gate) and force-promote to FIVE_STAR.
+            if setup.ema_coil_confirmed and setup.pattern in cfg.COIL_FORCE_PROMOTE_PATTERNS:
+                setup.trade_type = "FIVE_STAR_SCALABLE"
+                floor = 0   # bypass MIN_SETUP_SCORE entirely
+                setup.notes += " | ⚡ EMA Coil Force-Promoted"
+            # Scoring floor — per-pattern overrides for patterns whose discarded trades show
+            # higher WR than accepted trades (scoring inversion confirmed in backtest analysis).
+            # IFB discards: 67% WR; MFB discards: 61% WR — both above MIN_SETUP_SCORE=7 accepted trades.
+            # Lowering both to 5 captures high-quality structural setups the score mistakenly rejected.
+            elif setup.pattern in ("INSIDE_FALSE_BREAK", "MONDAY_FALSE_BREAK"):
+                floor = 5
+            else:
+                floor = cfg.MIN_SETUP_SCORE
+            if setup.score < floor:
+                d = _discard(pair, setup.pattern, setup.direction, setup.score, "BELOW_MIN_SCORE")
+                # Capture price levels so discard_analysis() can simulate would_have_hit_t1
+                d.entry_price = setup.entry_price
+                d.stop_price  = setup.stop_price
+                d.target_1    = setup.target_1
+                discarded.append(d)
+                continue
+                
+            if _is_diddle(setup, template):
+                discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                          setup.score, "DIDDLE_FILTERED"))
+                continue
 
-        # Litmus Test for Professional Size (100-Lot Test)
-        # NOTE: Litmus pass is tracked but does NOT override trade_type while
-        # FIVE_STAR is disabled (WR < 46% makes tranche structure destructive).
-        if passes_100_lot_test(setup, template):
-            setup.litmus_passed = True
-            setup.notes += " | ✅ 100-Lot Litmus Test Passed"
+            # ── HARD COIL GATE ────────────────────────────────────────────────────
+            # No H4/daily EMA coil confirmed at EOD → no trade. Period.
+            # Without measurable compression on the higher timeframe, potential
+            # energy has not built, there is no Deathline, and the surgical 20-pip
+            # stop has no structural wall to hide behind.
+            # COIL_FORCE_PROMOTE_PATTERNS (FRD/FGD/MFB) are exempt: the EOD H4
+            # proxy is not their confirmation signal — the live 15-min coil formed
+            # at the session open is. The session supervisor gates them instead.
+            # skip_coil_gate=True: backtester bypass — the D1 EMA coil proxy is
+            # sensitive to the rolling 1000-bar window; single-bar shifts flip it
+            # on/off for historical setups. Coil status is still stored in
+            # setup.ema_coil_confirmed but does not block in backtest mode.
+            if (not skip_coil_gate
+                    and not setup.ema_coil_confirmed
+                    and setup.pattern not in cfg.COIL_FORCE_PROMOTE_PATTERNS):
+                discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                          setup.score, "NO_HTF_COIL"))
+                continue
 
-        valid.append(setup)
+            # Litmus Test for Professional Size (100-Lot Test)
+            # NOTE: Litmus pass is tracked but does NOT override trade_type while
+            # FIVE_STAR is disabled (WR < 46% makes tranche structure destructive).
+            if passes_100_lot_test(setup, template):
+                setup.litmus_passed = True
+                setup.notes += " | ✅ 100-Lot Litmus Test Passed"
 
-    # Restore MAX_STOP_PIPS ceiling if it was patched for backtest
-    if _max_stop_backup is not None:
-        cfg.MAX_STOP_PIPS.update(_max_stop_backup)
+            valid.append(setup)
+
+    finally:
+        # Restore MAX_STOP_PIPS ceiling if it was patched for backtest
+        if _max_stop_backup is not None:
+            cfg.MAX_STOP_PIPS.update(_max_stop_backup)
 
     # Sort by score descending
     valid.sort(key=lambda s: s.score, reverse=True)

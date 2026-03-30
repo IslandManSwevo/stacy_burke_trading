@@ -11,7 +11,7 @@
       "Bash(python -c \"from acb_trader.signals.setups import detect_setups; print\\(''OK''\\)\")",
       "Bash(cmd /c \"python -c \"\"from acb_trader.signals.setups import detect_setups; print\\(''setups OK''\\)\"\"\")",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(Set-Location \"C:\\\\Users\\\\green\\\\stacy_burke_trading\"es use powershell)"
+      "Bash(Set-Location \"C:\\\\Users\\\\green\\\\stacy_burke_trading\")"
     ]
   }
 }

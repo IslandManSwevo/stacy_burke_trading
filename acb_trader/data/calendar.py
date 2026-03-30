@@ -20,41 +20,67 @@ class NewsEvent:
     impact: str             # "HIGH" | "MEDIUM" | "LOW"
 
 
+# ── CACHE ─────────────────────────────────────────────────────────────────────
+_CALENDAR_CACHE: list[NewsEvent] = []
+_CALENDAR_FETCHED_AT: datetime | None = None
+_CALENDAR_TTL_SEC: int = 300
+
+
 def fetch_calendar(
     window_start: datetime,
     window_end: datetime,
     impact: str = "HIGH",
+    force_refresh: bool = False,
 ) -> list[NewsEvent]:
     """
-    Fetch news events from ForexFactory JSON feed.
+    Fetch news events from ForexFactory JSON feed with short-lived cache.
     Falls back to empty list on network failure so trading is not blocked.
     """
-    try:
-        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        print(f"[calendar] Failed to fetch news calendar: {e}")
-        return []
+    global _CALENDAR_CACHE, _CALENDAR_FETCHED_AT
 
-    events = []
-    for item in data:
+    now = datetime.now(window_start.tzinfo if window_start.tzinfo else ET)
+    is_stale = (_CALENDAR_FETCHED_AT is None or 
+                (now - _CALENDAR_FETCHED_AT).total_seconds() > _CALENDAR_TTL_SEC)
+
+    if is_stale or force_refresh:
         try:
-            ts = datetime.fromisoformat(item["date"]).astimezone(ET)
-        except Exception:
+            url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+
+            new_events = []
+            for item in data:
+                try:
+                    # ISO format parsing for ForexFactory feed
+                    ts = datetime.fromisoformat(item["date"].replace("Z", "+00:00")).astimezone(ET)
+                    new_events.append(NewsEvent(
+                        timestamp=ts,
+                        currency=item.get("country", "").upper(),
+                        title=item.get("title", ""),
+                        impact=item.get("impact", "").upper(),
+                    ))
+                except Exception:
+                    continue
+            
+            _CALENDAR_CACHE = new_events
+            _CALENDAR_FETCHED_AT = now
+        except Exception as e:
+            print(f"[calendar] Failed to fetch news calendar: {e}")
+            # Do NOT clear old cache on failure — better to have stale data than none 
+            # if we have it, but return empty if we have nothing.
+            if not _CALENDAR_CACHE:
+                return []
+
+    # Filter from cache
+    filtered = []
+    for e in _CALENDAR_CACHE:
+        if e.timestamp < window_start or e.timestamp > window_end:
             continue
-        if ts < window_start or ts > window_end:
+        if impact == "HIGH" and e.impact != "HIGH":
             continue
-        if impact == "HIGH" and item.get("impact", "").upper() != "HIGH":
-            continue
-        events.append(NewsEvent(
-            timestamp=ts,
-            currency=item.get("country", "").upper(),
-            title=item.get("title", ""),
-            impact=item.get("impact", "").upper(),
-        ))
-    return events
+        filtered.append(e)
+    return filtered
 
 
 def get_currencies(pair: str) -> list[str]:
@@ -77,12 +103,12 @@ def get_currencies(pair: str) -> list[str]:
 def get_blocking_events(pair: str, session_open: datetime) -> list[NewsEvent]:
     """
     Return the HIGH-impact news events that block this pair around session_open.
-    Block window = 1hr before → 3hrs after session open.
+    Block window = 1hr before → NEWS_BLOCK_WINDOW_HOURS after session open.
     Returns an empty list when no blocking events exist.
     """
     currencies = get_currencies(pair)
     window_start = session_open - timedelta(hours=1)
-    window_end   = session_open + timedelta(hours=3)
+    window_end   = session_open + timedelta(hours=NEWS_BLOCK_WINDOW_HOURS)
     events = fetch_calendar(window_start, window_end, impact="HIGH")
     return [e for e in events if e.currency in currencies]
 

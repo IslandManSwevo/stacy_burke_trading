@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime, date
 from acb_trader.config import (
     ET, DAILY_LOSS_HALT_PCT, WEEKLY_DD_HALT_PCT, CONSEC_LOSS_HALT,
-    MIN_TARGET_PIPS, ANCHOR_CONFLUENCE_PIPS,
+    MIN_TARGET_PIPS, ANCHOR_CONFLUENCE_PIPS, COIL_FORCE_PROMOTE_PATTERNS,
 )
 from acb_trader.db.models import (
     AccountState, SystemHealthResult, Setup, WeeklyTemplate, DiscardedSetup
@@ -131,11 +131,8 @@ def passes_100_lot_test(setup: Setup, template: WeeklyTemplate) -> bool:
     # Confirmed 15-min EMA coil (9/20/50 spread <= 0.5×ATR14 for 3+ bars) at
     # the weekly extreme = potential energy fully loaded.  The coil is a harder
     # filter than any EOD point system.  Bypasses score >= 7 gate entirely.
-    _coil_force_promote = frozenset({
-        "FIRST_RED_DAY", "FIRST_GREEN_DAY", "MONDAY_FALSE_BREAK",
-    })
     if (getattr(setup, 'ema_coil_confirmed', False)
-            and setup.pattern in _coil_force_promote
+            and setup.pattern in COIL_FORCE_PROMOTE_PATTERNS
             and at_extreme):
         return True
 

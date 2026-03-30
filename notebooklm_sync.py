@@ -11,7 +11,6 @@ Usage:
 """
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 
@@ -68,9 +67,12 @@ async def push_files(client, notebook_name: str, paths: list[Path]):
             continue
         if path.name in existing_titles:
             print(f"  SKIP (already uploaded): {path.name}")
-            continue
         print(f"  Uploading: {path}")
-        await client.sources.add_file(nb.id, str(path), wait=True)
+        try:
+            await client.sources.add_file(nb.id, str(path), wait=True)
+        except Exception as e:
+            print(f"  ERROR uploading {path}: {e}")
+            continue
 
     print(f"  Done → {notebook_name}")
     return nb
@@ -158,7 +160,6 @@ async def main():
             await cmd_ask(client, args[1], " ".join(args[2:]))
         else:
             print(f"Unknown command: {cmd}")
-            print(__doc__)
             sys.exit(1)
 
 

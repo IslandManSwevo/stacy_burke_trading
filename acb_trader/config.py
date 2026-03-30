@@ -5,8 +5,13 @@ Edit here only. Never hardcode values in modules.
 """
 
 from zoneinfo import ZoneInfo
+import os
 
 ET = ZoneInfo("America/New_York")
+
+# ── PATHS ────────────────────────────────────────────────────────────────────
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PAUSED_SETUPS_PATH = os.path.join(PROJECT_ROOT, "paused_setups.json")
 
 # ── RISK ──────────────────────────────────────────────────────────────────────
 RISK_PER_TRADE_PCT   = 0.01    # 1% account risk per trade

@@ -164,7 +164,7 @@ class Setup:
     expires: date
     notes: str
     breakdown: Optional["ScoreBreakdown"] = field(default=None)  # ScoreBreakdown; object avoids circular import
-    news_events: list = field(default_factory=list)  # NewsEvent list when setup is news-paused
+    news_events: list["NewsEvent"] = field(default_factory=list)  # NewsEvent list when setup is news-paused
 
 
 # ── SESSION LEVELS (live) ─────────────────────────────────────────────────────

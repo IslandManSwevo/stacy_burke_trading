@@ -5,12 +5,15 @@ Every active trade moves through states exactly once — no backwards transition
 
 from __future__ import annotations
 import uuid
+import logging
 from datetime import datetime, date
 from acb_trader.config import ET, BREAKEVEN_PIPS, TRAIL_STEP_PIPS
 from acb_trader.db.models import Setup, TradeRecord, AccountState
 from acb_trader.data.levels import get_pip_size, price_to_pips
 from acb_trader.data.calendar import is_in_news_settle_window
 from acb_trader.execution.coil import is_two_sided
+
+log = logging.getLogger(__name__)
 
 # Terminal states
 TERMINAL = frozenset([
@@ -46,8 +49,8 @@ class ActiveTrade:
         if self.state != "PENDING_ENTRY":
             raise ValueError(f"on_fill called in invalid state: {self.state}")
         if is_in_news_settle_window(self.setup.pair, fill_time):
-            print(f"[state_machine] FILL BLOCKED: {self.setup.pair} inside "
-                  f"30-min MRN settle window at {fill_time} — staying PENDING")
+            log.warning("[state_machine] FILL BLOCKED: %s inside 30-min MRN settle window at %s — staying PENDING", 
+                        self.setup.pair, fill_time)
             return False
         self.state       = "ACTIVE"
         self.entry_price = fill_price

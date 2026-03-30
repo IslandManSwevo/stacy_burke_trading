@@ -36,6 +36,8 @@ from acb_trader.config import (
     EMA_COIL_PERIODS,
     EMA_COIL_TIGHT_MULT,
     SESSION_WINDOWS,
+    FIVE_STAR_TRANCHES,
+    SESSION_TRADE_TRANCHES,
 )
 from acb_trader.data.levels import compute_atr, get_pip_size
 from acb_trader.db.models import Setup, TradeRecord
@@ -256,7 +258,7 @@ def _tick_manage(m: _Monitor, feed, client: MT5Client) -> Optional[TradeRecord]:
             or (setup.direction == "LONG"  and current_price >= setup.target_1)
         )
         if t1_hit:
-            tranche_a_pct = 0.5 if setup.trade_type == "FIVE_STAR_SCALABLE" else 1.0
+            tranche_a_pct = FIVE_STAR_TRANCHES["A"] if setup.trade_type == "FIVE_STAR_SCALABLE" else SESSION_TRADE_TRANCHES["A"]
             client.close_position(ticket, round(trade.lot_size * tranche_a_pct, 2), pair)
             new_state = trade.on_target_1_hit(current_price, now)
             send_state_change(trade, new_state or "PARTIAL_EXIT")
@@ -273,14 +275,14 @@ def _tick_manage(m: _Monitor, feed, client: MT5Client) -> Optional[TradeRecord]:
             or (setup.direction == "LONG"  and current_price >= setup.target_2)
         )
         if t2_hit:
-            client.close_position(ticket, round(trade.lot_size * 0.30, 2), pair)
+            client.close_position(ticket, round(trade.lot_size * FIVE_STAR_TRANCHES["B"], 2), pair)
             trade.on_target_2_hit(current_price, now)
             send_state_change(trade, "PARTIAL_EXIT_2")
 
     # ── Trailing stop (Tranche C, FIVE_STAR only) ─────────────────────────────
     if trade.t2_hit:
         if trade.is_trail_stop_hit(current_price):
-            client.close_position(ticket, round(trade.lot_size * 0.20, 2), pair)
+            client.close_position(ticket, round(trade.lot_size * FIVE_STAR_TRANCHES["C"], 2), pair)
             return _close(trade.on_trail_stop_hit, current_price, "TRAIL_CLOSE")
         if trade.should_advance_trail(current_price):
             trade.advance_trail(current_price)

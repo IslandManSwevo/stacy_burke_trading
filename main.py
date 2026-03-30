@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import sys
 import json
-import copy
+
 import dataclasses
 import schedule
 import signal
@@ -88,11 +88,15 @@ def _save_paused_setups(setups: list) -> None:
 
     def _serialise(s) -> dict:
         d = dataclasses.asdict(s)
-        # Convert non-serialisable types
-        for k, v in d.items():
-            if isinstance(v, (date, datetime)):
-                d[k] = v.isoformat()
-        # news_events contains NewsEvent dataclasses — already dict after asdict
+        def _convert_datetimes(obj):
+            if isinstance(obj, dict):
+                return {k: _convert_datetimes(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [_convert_datetimes(item) for item in obj]
+            elif isinstance(obj, (date, datetime)):
+                return obj.isoformat()
+            return obj
+        d = _convert_datetimes(d)
         return d
 
     new_entries = [_serialise(s) for s in setups]
@@ -434,6 +438,8 @@ def _graceful_shutdown(signum, frame) -> None:
         if t.is_alive():
             print(f"[main] Joining {t.name}...")
             t.join(timeout=300)
+            if t.is_alive():
+                print(f"[main] ⚠️ TIMEOUT: {t.name} hung after 300s, skipping join")
     print("[main] All sessions resolved — exiting")
     raise SystemExit(0)
 

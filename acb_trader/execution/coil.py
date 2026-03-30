@@ -45,18 +45,21 @@ def has_ema_coil_htf(
         return False
 
     # ── Select the correct ATR multiplier for the structural timeframe ──────
-    mult = EMA_COIL_DAILY_MULT if timeframe == "DAILY" else EMA_COIL_TIGHT_MULT
+    tf_norm = timeframe.upper()
+    valid_tfs = {
+        "DAILY": (EMA_COIL_DAILY_MULT, COIL_SIDEWAYS_ATR_MULT_DAILY),
+        "INTRADAY": (EMA_COIL_TIGHT_MULT, COIL_SIDEWAYS_ATR_MULT),
+    }
+    if tf_norm not in valid_tfs:
+        raise ValueError(f"Invalid timeframe: '{timeframe}'. Expected 'DAILY' or 'INTRADAY'.")
+
+    mult, sw_mult = valid_tfs[tf_norm]
 
     closes = ohlcv_htf["close"]
     ema_vals = {p: float(compute_ema(closes, p).iloc[-1]) for p in EMA_COIL_PERIODS}
     spread = max(ema_vals.values()) - min(ema_vals.values())
     coil_tight = spread <= mult * atr14
 
-    # Last 3 bars sideways
-    last3_range = float(ohlcv_htf["high"].iloc[-3:].max() - ohlcv_htf["low"].iloc[-3:].min())
-    # Daily bars have naturally wider ranges than intraday — use the relaxed
-    # daily multiplier (2.5×) so genuine daily compressions pass the gate.
-    sw_mult = COIL_SIDEWAYS_ATR_MULT_DAILY if timeframe == "DAILY" else COIL_SIDEWAYS_ATR_MULT
     coil_sideways = last3_range <= sw_mult * atr14
     return coil_tight and coil_sideways
 

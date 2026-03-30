@@ -43,7 +43,10 @@ from typing import Optional
 
 import pandas as pd
 
-from acb_trader.data.levels import get_pip_size, price_to_pips, snap_to_quarter
+from acb_trader.data.levels import (
+    get_pip_size, price_to_pips, snap_to_quarter,
+    grid_level_above, grid_level_below
+)
 import acb_trader.config as cfg
 
 
@@ -120,7 +123,7 @@ class ThreeBoxAnalysis:
             f"  Box 1  : {self.box_1:.5f}  ({self.box_size_pips} pips)",
             f"  Box 2  : {self.box_2:.5f}  ({self.box_size_pips * 2} pips)",
             f"  Box 3  : {self.box_3:.5f}  ({self.box_size_pips * 3} pips) ← EXHAUSTION",
-            f"  Boxes through: {self.boxes_completed}/3"
+            f"  Boxes through: {self.boxes_completed}/3",
             f"{'  ⚠️ EXHAUSTION — wait for coil' if self.at_exhaustion else ''}",
             f"  HTF L1 : {self.htf_l1:.5f}  ({_level_pips('L1', self.pair)} pips)",
             f"  HTF L2 : {self.htf_l2:.5f}  ({_level_pips('L2', self.pair)} pips)",
@@ -151,16 +154,12 @@ def snap_to_grid(price: float, pair: str) -> float:
 
 def snap_to_grid_above(price: float, pair: str) -> float:
     """Snap to the quarter-level grid line ABOVE (or equal to) price."""
-    pip = get_pip_size(pair)
-    level_size = 25 * pip
-    return round(math.ceil(price / level_size) * level_size, 5)
+    return grid_level_above(price, pair)
 
 
 def snap_to_grid_below(price: float, pair: str) -> float:
     """Snap to the quarter-level grid line BELOW (or equal to) price."""
-    pip = get_pip_size(pair)
-    level_size = 25 * pip
-    return round(math.floor(price / level_size) * level_size, 5)
+    return grid_level_below(price, pair)
 
 
 def get_box_size_pips(pair: str) -> int:
@@ -385,13 +384,15 @@ def find_breakout_anchor(
         # The pump drove price UP through 3 levels → find the pre-pump LOW
         # as the consolidation base, then the expansion drives DOWN from
         # the pump high.
-        pump_high = float(ohlcv["high"].iloc[pre_trend_idx:-1].max())
+        high_slice = ohlcv["high"].iloc[pre_trend_idx:-1]
+        pump_high = float(high_slice.max() if not high_slice.empty else ohlcv["high"].iloc[-2])
         return snap_to_grid_above(pump_high, pair)
     else:
         # The dump drove price DOWN through 3 levels → find the pre-dump HIGH
         # as the consolidation base, then the expansion drives UP from
         # the dump low.
-        dump_low = float(ohlcv["low"].iloc[pre_trend_idx:-1].min())
+        low_slice = ohlcv["low"].iloc[pre_trend_idx:-1]
+        dump_low = float(low_slice.min() if not low_slice.empty else ohlcv["low"].iloc[-2])
         return snap_to_grid_below(dump_low, pair)
 
 
