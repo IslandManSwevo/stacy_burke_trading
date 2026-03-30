@@ -190,6 +190,7 @@ class CoilState:
     coil_high: float
     ema_spread: float
     bars_sideways: int
+    expired: bool = False   # True when session_close has passed — no carry-forward
 
 
 @dataclass

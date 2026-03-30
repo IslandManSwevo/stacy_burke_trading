@@ -50,6 +50,23 @@ def detect_setups(
     if state.state == "RANGING":
         return [], [_discard(state.pair, "NONE", "NEUTRAL", 0, "MARKET_IS_RANGING")]
 
+    # ── TRAP CONFIDENCE GATE (Mistake §2: "Diddling in the Middle") ────────────
+    # LOW confidence = abs(close_streak) ≤ 1 → no directional conviction.
+    # Volume is NOT pinned at extremes (HOW/LOW, HCOM/LCOM, Deathline).
+    # Trying to force setups from this noise is a 50/50 coin flip — the
+    # textbook "diddling for dollars" that chops equity to pieces.
+    # Gate requires at minimum MEDIUM confidence (streak ≥ 2) to proceed.
+    if (state.trap
+            and state.trap.trap_confidence not in cfg.MIN_TRAP_CONFIDENCE):
+        return [], [_discard(state.pair, "NONE", "NEUTRAL", 0,
+                             "TRAP_CONFIDENCE_LOW")]
+
+    # ── WEEKLY PHASE AWARENESS ────────────────────────────────────────────────
+    # entry_bias encodes Front Side / Back Side / WAIT / NO_ENTRY.
+    # Used below to block reversal patterns on Front Side and continuation
+    # patterns on Back Side — the DayRole labels are no longer cosmetic.
+    entry_bias = template.day_role.entry_bias if template else "BACK_SIDE"
+
     pair = state.pair
     atr14 = state.atr14
     valid: list[Setup] = []
@@ -76,6 +93,24 @@ def detect_setups(
                                       "?", 0, reason))
             continue
         if setup is None:
+            continue
+
+        # ── WEEKLY PHASE GATE ─────────────────────────────────────────────────
+        # Back Side reversal patterns (PCD, FRD/FGD, Parabolic) are blocked
+        # on Front Side days: the institutional trap hasn't locked in yet.
+        # Front Side continuation patterns (LHF) are blocked on Back Side:
+        # chasing momentum during liquidation phase = catching falling knives.
+        if entry_bias == "FRONT_SIDE" and setup.pattern in cfg.BACK_SIDE_PATTERNS:
+            discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                      0, "FRONT_SIDE_NO_REVERSALS"))
+            continue
+        if entry_bias == "BACK_SIDE" and setup.pattern in cfg.FRONT_SIDE_PATTERNS:
+            discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                      0, "BACK_SIDE_NO_CONTINUATIONS"))
+            continue
+        if entry_bias == "NO_ENTRY":
+            discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                      0, "NO_ENTRY_DAY"))
             continue
 
         # Score and classify
@@ -130,6 +165,15 @@ def detect_setups(
 def _detect_pump_coil_dump(
     pair, state, template, ohlcv, atr14, as_of: Optional[date] = None
 ) -> Optional[tuple[Optional[Setup], str]]:
+    # ── DAY-OF-WEEK GATE (Weekly Template §Back Side) ──────────────────────────
+    # PCD is a reversal pattern: 3HC/3LC → coil → dump. Firing on Mon/Tue
+    # means the "trap" is still building — institutional capital is still
+    # inducing breakout chasers. Only Wed (pivot) or Thu (Back Side Day 1)
+    # give the trap time to lock in the HOW/LOW before reversal.
+    sig_date = as_of if as_of else datetime.now(cfg.ET).date()
+    if sig_date.weekday() not in (2, 3):   # 2=Wednesday, 3=Thursday
+        return None, "PCD_FRONT_SIDE_BLOCKED"
+
     pip = get_pip_size(pair)
     today = ohlcv.iloc[-1]
     prev  = ohlcv.iloc[-2]
@@ -500,6 +544,15 @@ def _detect_parabolic_reversal(
     Parabolic reversal fires when the daily close is near a named structural level
     after pushing to a new extreme. Entry is on the following session's coil breakdown.
     """
+    # ── DAY-OF-WEEK GATE (Weekly Template §Back Side) ──────────────────────────
+    # Parabolic reversals at major levels are Back Side trades: the HOW/LOW
+    # must be locked in before fading. Mon/Tue = Front Side expansion;
+    # attempting to catch a parabolic top/bottom while the market is still
+    # building the trap is how you blow out the account.
+    sig_date = as_of if as_of else datetime.now(cfg.ET).date()
+    if sig_date.weekday() not in (2, 3):   # 2=Wednesday, 3=Thursday
+        return None, "PARA_FRONT_SIDE_BLOCKED"
+
     pip = get_pip_size(pair)
     last_close = float(ohlcv["close"].iloc[-1])
     anchors = template.anchors
@@ -667,6 +720,15 @@ def _detect_low_hanging_fruit(
     Today pulls back to the 50% level of that move — entry there.
     Direction follows the prior explosive candle.
     """
+    # ── DAY-OF-WEEK GATE (Weekly Template §Front Side) ─────────────────────────
+    # LHF is a trend-continuation scalp ("Nail and Bail") — appropriate on
+    # the Front Side when the market is expanding the range. On the Back Side
+    # (Thu/Fri), we are hunting reversals, not continuations; chasing the
+    # prior session's momentum on Thu/Fri = catching a falling knife.
+    sig_date = as_of if as_of else datetime.now(cfg.ET).date()
+    if sig_date.weekday() not in (0, 1, 2):   # 0=Mon, 1=Tue, 2=Wed
+        return None, "LHF_BACK_SIDE_BLOCKED"
+
     if len(ohlcv) < 2:
         return None, ""
 

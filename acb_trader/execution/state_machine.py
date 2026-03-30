@@ -43,7 +43,8 @@ class ActiveTrade:
         """Accept a fill.  Returns False (and stays PENDING) if the pair
         is inside the 30-min post-MRN settle window — the fill must be
         rejected or the pending order cancelled to avoid slippage."""
-        assert self.state == "PENDING_ENTRY"
+        if self.state != "PENDING_ENTRY":
+            raise ValueError(f"on_fill called in invalid state: {self.state}")
         if is_in_news_settle_window(self.setup.pair, fill_time):
             print(f"[state_machine] FILL BLOCKED: {self.setup.pair} inside "
                   f"30-min MRN settle window at {fill_time} — staying PENDING")

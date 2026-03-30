@@ -7,10 +7,13 @@ Runs live on the intraday feed during the session window.
 from __future__ import annotations
 import pandas as pd
 import numpy as np
+from datetime import datetime
+from typing import Optional
 from acb_trader.config import (
+    ET,
     EMA_COIL_PERIODS, EMA_COIL_TIGHT_MULT, EMA_COIL_DAILY_MULT, EMA_ENTRY_PERIOD,
     COIL_SIDEWAYS_BARS, TWO_SIDED_PIPS, TWO_SIDED_CANDLES,
-    COIL_SIDEWAYS_ATR_MULT
+    COIL_SIDEWAYS_ATR_MULT,
 )
 from acb_trader.db.models import CoilState, InitialBalance, Setup
 from acb_trader.data.levels import (
@@ -60,58 +63,82 @@ def wait_for_ema_coil(
     level: float,
     direction: str,
     bars_15min: pd.DataFrame,
+    session_close: Optional[datetime] = None,
 ) -> CoilState:
     """
     Monitor 15-min bars for coil formation near `level`.
-    Returns CoilState with triggered=True when:
-      1. Price within 10 pips of level
-      2. EMA spread ≤ 0.5 × ATR14 on 15-min
-      3. Price sideways ≥ 3 consecutive 15-min bars
-      4. Breakdown bar closes through coil extreme in trade direction
+
+    Gate sequence (all must pass to set triggered=True):
+      1. Session window — if session_close has passed, returns expired=True immediately.
+         No carry-forward to the next session; the setup is cancelled.
+      2. Data length guard.
+      3. Consecutive coil counter — scans every closed 15-min bar from the most recent
+         backwards; increments while EMA spread ≤ EMA_COIL_TIGHT_MULT × ATR14 (0.5×),
+         resets to 0 on the first bar that exceeds the threshold.
+         Requires COIL_SIDEWAYS_BARS (≥3) consecutive qualifying bars to ARM.
+      4. Near-level check — last close within 10 pips of the setup's entry level.
+      5. Coil range check — range of the coil bars ≤ COIL_SIDEWAYS_ATR_MULT × ATR.
+      6. Breakdown confirmation — last 5-min close through the coil extreme in
+         the intended trade direction.
     """
+    # ── 1. Session expiration guardrail ──────────────────────────────────────
+    if session_close is not None:
+        now = datetime.now(ET)
+        if now >= session_close:
+            return CoilState(triggered=False, coil_low=0.0, coil_high=0.0,
+                             ema_spread=0.0, bars_sideways=0, expired=True)
+
     pip = get_pip_size(pair)
-    if len(bars_15min) < max(EMA_COIL_PERIODS) + COIL_SIDEWAYS_BARS + 2:
+    min_bars = max(EMA_COIL_PERIODS) + COIL_SIDEWAYS_BARS + 2
+    if len(bars_15min) < min_bars:
         return CoilState(False, 0.0, 0.0, 0.0, 0)
 
     closes = bars_15min["close"]
     atr    = compute_atr(bars_15min, 14)
 
-    ema_vals = {p: float(compute_ema(closes, p).iloc[-1]) for p in EMA_COIL_PERIODS}
-    spread   = max(ema_vals.values()) - min(ema_vals.values())
+    # ── 2. Build per-bar EMA spread series (single pass, not per-bar recompute) ─
+    ema_df     = pd.DataFrame({p: compute_ema(closes, p) for p in EMA_COIL_PERIODS})
+    spread_ser = ema_df.max(axis=1) - ema_df.min(axis=1)
 
-    # Near level check
+    # ── 3. Consecutive coiled-bar counter ────────────────────────────────────
+    # Scan backwards from the most recent closed bar. Every bar where
+    # EMA spread ≤ EMA_COIL_TIGHT_MULT × ATR14 adds 1 to the counter.
+    # The first bar that fails the condition breaks the streak.
+    consecutive_coiled = 0
+    threshold = EMA_COIL_TIGHT_MULT * atr
+    for i in range(len(spread_ser) - 1, -1, -1):
+        if spread_ser.iloc[i] <= threshold:
+            consecutive_coiled += 1
+        else:
+            break   # streak broken — do not continue scanning older bars
+
+    coil_armed = consecutive_coiled >= COIL_SIDEWAYS_BARS
+
+    # ── 4. Near level ────────────────────────────────────────────────────────
     last_close = float(closes.iloc[-1])
     near_level = abs(last_close - level) <= 10 * pip
 
-    # Coil tightness
-    emas_coiled = spread <= EMA_COIL_TIGHT_MULT * atr
+    # ── 5. Coil range (high/low of the consecutively coiled bars) ────────────
+    n = max(consecutive_coiled, COIL_SIDEWAYS_BARS)
+    n = min(n, len(bars_15min))
+    coil_high = float(bars_15min["high"].iloc[-n:].max())
+    coil_low  = float(bars_15min["low"].iloc[-n:].min())
+    sideways  = (coil_high - coil_low) <= COIL_SIDEWAYS_ATR_MULT * atr
 
-    # Sideways check — last N bars in tight range
-    n = COIL_SIDEWAYS_BARS
-    recent_high = float(bars_15min["high"].iloc[-n:].max())
-    recent_low  = float(bars_15min["low"].iloc[-n:].min())
-    sideways    = (recent_high - recent_low) <= 1.0 * atr
-
-    # Breakdown confirmation
-    coil_low  = float(bars_15min["low"].iloc[-(n+1):-1].min())
-    coil_high = float(bars_15min["high"].iloc[-(n+1):-1].max())
-
+    # ── 6. Breakdown confirmation ─────────────────────────────────────────────
     if direction == "SHORT":
         breakdown = last_close < coil_low
     else:
         breakdown = last_close > coil_high
 
-    bars_sw = sum(
-        1 for i in range(-n, 0)
-        if abs(float(bars_15min["close"].iloc[i]) - float(bars_15min["close"].iloc[i-1])) <= atr * 0.3
-    )
+    current_spread = float(spread_ser.iloc[-1])
 
     return CoilState(
-        triggered   = near_level and emas_coiled and sideways and breakdown,
-        coil_low    = coil_low,
-        coil_high   = coil_high,
-        ema_spread  = spread,
-        bars_sideways = bars_sw,
+        triggered     = coil_armed and near_level and sideways and breakdown,
+        coil_low      = coil_low,
+        coil_high     = coil_high,
+        ema_spread    = current_spread,
+        bars_sideways = consecutive_coiled,
     )
 
 

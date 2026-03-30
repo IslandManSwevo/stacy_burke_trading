@@ -153,6 +153,33 @@ NEWS_SETTLE_MINUTES      = 30              # Post-MRN settle: no entry within 30
 # the prerequisite everywhere: weekly countdown, watchlist, PCD, FRD/FGD.
 MIN_STREAK_DAYS          = 3               # Uncompromising 3-day structural minimum
 
+# ── TRAP CONFIDENCE GATE (Mistake §2: "Diddling in the Middle") ──────────────
+# TrapAnalysis.trap_confidence = "HIGH" (streak >= 3) | "MEDIUM" (streak == 2)
+# | "LOW" (streak <= 1).  LOW confidence means the market has no directional
+# conviction — volume is NOT pinned at extremes.  Forcing setups from noise
+# is a 50/50 coin flip that destroys capital ("diddling for dollars").
+# Trapped volume only fuels explosive ACB moves when it accumulates at
+# Yesterday's H/L, HOW/LOW, HCOM/LCOM, or a Deathline at 00/50 levels.
+MIN_TRAP_CONFIDENCE      = frozenset({"HIGH", "MEDIUM"})  # LOW = reject
+
+# ── WEEKLY PHASE ENFORCEMENT ─────────────────────────────────────────────────
+# Front Side (Mon → Wed before structural break): range expansion, trap building.
+#   Only CONTINUATION scalps allowed — "Low Hanging Fruit", session-specific plays.
+#   Taking reversals on the Front Side = stepping in front of a freight train.
+# Back Side (Wed after signal → Fri): trend exhaustion, ACB liquidation.
+#   Reversal patterns fire HERE — PCD, FRD/FGD, Parabolic.
+#   This is where trapped breakout traders are forced to liquidate.
+BACK_SIDE_PATTERNS = frozenset({
+    "PUMP_COIL_DUMP",       # 3HC/3LC reversal — needs Back Side confirmation
+    "FIRST_RED_DAY",        # Structural break — Back Side by definition
+    "FIRST_GREEN_DAY",      # Structural break — Back Side by definition
+    "PARABOLIC_REVERSAL",   # Major-level reversal — Back Side only
+})
+FRONT_SIDE_PATTERNS = frozenset({
+    "LOW_HANGING_FRUIT",    # Continuation scalp — Front Side momentum play
+})
+# IFB, MFB, IB_EXTREME are structurally self-gating (DOW + setup logic)
+
 # Patterns that fire through detection & scoring but are flagged [MONITOR ONLY] in Telegram.
 # Single source of truth: acb_trader/signals/patterns.py (PatternDef.monitor_only=True).
 # To gate/ungate a pattern: edit monitor_only in patterns.py only — this re-export keeps
