@@ -1,11 +1,17 @@
 import csv
+import sys
+
 print("=== ALL ACCEPTED TRADES ===")
-with open("backtest_results.csv") as f:
-    rows = list(csv.DictReader(f))
+try:
+    with open("backtest_results.csv") as f:
+        rows = list(csv.DictReader(f))
+except FileNotFoundError:
+    print("backtest_results.csv not found, skipping accepted trades.")
+    rows = []
+
 for r in rows:
     print(f"  {r['pair']:8s} {r['pattern']:20s} {r['direction']:6s} {r['terminal_state']:20s} r={r['r_multiple']:>6s}  score={r['score']}")
 
-wins = sum(1 for r in rows if float(r["r_multiple"]) > 0)
 wins = sum(1 for r in rows if float(r["r_multiple"]) > 0)
 total = len(rows)
 total_r = sum(float(r["r_multiple"]) for r in rows)

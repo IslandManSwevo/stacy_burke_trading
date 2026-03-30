@@ -385,14 +385,20 @@ def find_breakout_anchor(
         # as the consolidation base, then the expansion drives DOWN from
         # the pump high.
         high_slice = ohlcv["high"].iloc[pre_trend_idx:-1]
-        pump_high = float(high_slice.max() if not high_slice.empty else ohlcv["high"].iloc[-2])
+        if not high_slice.empty:
+            pump_high = float(high_slice.max())
+        else:
+            pump_high = float(ohlcv["high"].iloc[-2] if len(ohlcv) >= 2 else ohlcv["high"].iloc[-1])
         return snap_to_grid_above(pump_high, pair)
     else:
         # The dump drove price DOWN through 3 levels → find the pre-dump HIGH
         # as the consolidation base, then the expansion drives UP from
         # the dump low.
         low_slice = ohlcv["low"].iloc[pre_trend_idx:-1]
-        dump_low = float(low_slice.min() if not low_slice.empty else ohlcv["low"].iloc[-2])
+        if not low_slice.empty:
+            dump_low = float(low_slice.min())
+        else:
+            dump_low = float(ohlcv["low"].iloc[-2] if len(ohlcv) >= 2 else ohlcv["low"].iloc[-1])
         return snap_to_grid_below(dump_low, pair)
 
 

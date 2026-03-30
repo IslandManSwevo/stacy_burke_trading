@@ -180,12 +180,11 @@ def detect_setups(
                     discarded.append(_discard(pair, setup.pattern, setup.direction,
                                               0, "RR_ZERO"))
                     continue
-                if _risk_dist > 0:
-                    _planned_rr = _t1_dist / _risk_dist
-                    if _planned_rr < cfg.MIN_SETUP_RR:
-                        discarded.append(_discard(pair, setup.pattern, setup.direction,
-                                                  0, "RR_TOO_LOW"))
-                        continue
+                _planned_rr = _t1_dist / _risk_dist
+                if _planned_rr < cfg.MIN_SETUP_RR:
+                    discarded.append(_discard(pair, setup.pattern, setup.direction,
+                                              0, "RR_TOO_LOW"))
+                    continue
 
             # ── BACKTEST SIMULATED STOP — SCORING ONLY ──────────────────────────────
             # Daily bars produce wide stops (40–300 pips from the day's H/L range).
@@ -239,14 +238,18 @@ def detect_setups(
                             setup.target_3 = snap_to_quarter(_t3_r, setup.pair)
 
                 setup.notes = _annotate_3box(setup.notes, _tba)
-            except Exception:
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).exception(f"Three-box analysis failed for {setup.pair} {setup.direction}: {e}")
                 setup._three_box_analysis = None  # grid analysis non-fatal
 
             # Score and classify with three-box context now attached
             prior_streak = compute_close_streak(daily_ohlcv.iloc[:-1])
-            from acb_trader.signals._scoring import score_setup
+            global _score_setup_fn
+            if '_score_setup_fn' not in globals():
+                from acb_trader.signals._scoring import score_setup as _score_setup_fn
             setup.ema_coil_confirmed = ema_coil
-            bd = score_setup(setup, state, template, ema_coil)
+            bd = _score_setup_fn(setup, state, template, ema_coil)
             if setup.pattern == "INSIDE_FALSE_BREAK":
                 bd.total = _apply_ifb_volume_bonus(daily_ohlcv, bd.total)
             setup.score = bd.total

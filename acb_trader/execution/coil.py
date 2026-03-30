@@ -60,6 +60,9 @@ def has_ema_coil_htf(
     spread = max(ema_vals.values()) - min(ema_vals.values())
     coil_tight = spread <= mult * atr14
 
+    last3_high = float(ohlcv_htf["high"].iloc[-3:].max())
+    last3_low = float(ohlcv_htf["low"].iloc[-3:].min())
+    last3_range = last3_high - last3_low
     coil_sideways = last3_range <= sw_mult * atr14
     return coil_tight and coil_sideways
 

@@ -10,6 +10,7 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from acb_trader.signals._scoring import ScoreBreakdown
+    from acb_trader.data.calendar import NewsEvent
 
 
 # ── MARKET CLASSIFICATION ─────────────────────────────────────────────────────

@@ -67,6 +67,7 @@ async def push_files(client, notebook_name: str, paths: list[Path]):
             continue
         if path.name in existing_titles:
             print(f"  SKIP (already uploaded): {path.name}")
+            continue
         print(f"  Uploading: {path}")
         try:
             await client.sources.add_file(nb.id, str(path), wait=True)

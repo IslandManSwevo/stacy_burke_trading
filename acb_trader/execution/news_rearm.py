@@ -153,7 +153,8 @@ def check_paused_setups(feed: BrokerFeed, order_mgr: Optional[OrderManager] = No
         try:
             signal_date = date.fromisoformat(entry["signal_date"])
         except (KeyError, ValueError):
-            print(f"[news_rearm] {pair} {pattern}: invalid signal_date — skipping")
+            print(f"[news_rearm] {pair} {pattern}: invalid signal_date ({entry.get('signal_date')}) — skipping and keeping")
+            remaining.append(entry)
             continue
 
         # Build re-armed Setup and place order
@@ -180,7 +181,9 @@ def check_paused_setups(feed: BrokerFeed, order_mgr: Optional[OrderManager] = No
         try:
             acc = feed.get_account()
             lot_size = calculate_position_size(acc["balance"], setup.entry_price, setup.stop_price, setup.pair)
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"[news_rearm] Failed lot size computation for {setup.pair}: {e}", exc_info=True)
             lot_size = 0.01  # Fallback minimum
 
         if order_mgr is not None:

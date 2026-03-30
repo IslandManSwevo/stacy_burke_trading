@@ -20,11 +20,13 @@ class NewsEvent:
     impact: str             # "HIGH" | "MEDIUM" | "LOW"
 
 
+import threading
+
 # ── CACHE ─────────────────────────────────────────────────────────────────────
 _CALENDAR_CACHE: list[NewsEvent] = []
 _CALENDAR_FETCHED_AT: datetime | None = None
 _CALENDAR_TTL_SEC: int = 300
-
+_CALENDAR_LOCK = threading.Lock()
 
 def fetch_calendar(
     window_start: datetime,
@@ -71,13 +73,14 @@ def fetch_calendar(
             # if we have it, but return empty if we have nothing.
             if not _CALENDAR_CACHE:
                 return []
+            else:
+                # proceed to filter cached items
+                pass
 
     # Filter from cache
     filtered = []
     for e in _CALENDAR_CACHE:
-        if e.timestamp < window_start or e.timestamp > window_end:
-            continue
-        if impact == "HIGH" and e.impact != "HIGH":
+        if e.impact != impact:
             continue
         filtered.append(e)
     return filtered
