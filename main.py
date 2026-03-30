@@ -5,6 +5,7 @@ Intraday supervisors fire at each institutional session open (Asia / London / NY
 """
 
 from __future__ import annotations
+from dotenv import load_dotenv; load_dotenv()
 import os
 import sys
 import json
@@ -42,11 +43,7 @@ from acb_trader.db.session_tracker import (
 from acb_trader.signals.weekly import build_weekly_template, build_weekly_review
 from acb_trader.models import DiscardedSetup
 
-try:
-    from dotenv import load_dotenv as _load_dotenv
-    _load_dotenv()
-except ImportError:
-    pass  # python-dotenv not installed — fall back to OS-level env vars
+
 
 
 PAUSED_SETUPS_PATH = os.path.join(os.path.dirname(__file__), "paused_setups.json")
@@ -195,6 +192,7 @@ def run_eod(feed: BrokerFeed):
                     session_1min=session_1min,
                     current_week=current_week,
                     current_month=current_month,
+                    as_of=now.date(),
                 )
                 states[pair] = state
 
@@ -206,6 +204,7 @@ def run_eod(feed: BrokerFeed):
                     prior_week_low=state.low_of_week,
                     prior_month_high=state.hom,
                     prior_month_low=state.lom,
+                    as_of=now.date(),
                 )
 
                 if not wl.on_watchlist:
@@ -224,6 +223,7 @@ def run_eod(feed: BrokerFeed):
                     atr14=state.atr14,
                     close_streak=state.close_streak,
                     cib_direction=state.cib_direction,
+                    as_of=now.date(),
                 )
                 all_templates.append(template)
 

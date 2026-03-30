@@ -15,14 +15,24 @@ from acb_trader.db.models import Setup, TradeRecord, SystemHealthResult, WeeklyT
 def _send(text: str) -> bool:
     token   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    proxy_url = os.environ.get("TELEGRAM_PROXY", "")
     if not token or not chat_id:
         print(f"[telegram] {text}")
         return True
+    
+    proxies = {}
+    if proxy_url:
+        proxies = {
+            "http": proxy_url,
+            "https": proxy_url,
+        }
+
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
             timeout=10,
+            proxies=proxies if proxies else None,
         )
         return resp.ok
     except Exception as e:
