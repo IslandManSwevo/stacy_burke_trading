@@ -57,6 +57,20 @@ def snap_stop_beyond(price: float, direction: str, pair: str) -> float:
     return math.floor(price / level_size) * level_size
 
 
+def grid_level_above(price: float, pair: str) -> float:
+    """Next institutional grid level ABOVE price (ceiling to 00/25/50/75)."""
+    pip = get_pip_size(pair)
+    level_size = 25 * pip
+    return round(math.ceil(price / level_size) * level_size, 5)
+
+
+def grid_level_below(price: float, pair: str) -> float:
+    """Next institutional grid level BELOW price (floor to 00/25/50/75)."""
+    pip = get_pip_size(pair)
+    level_size = 25 * pip
+    return round(math.floor(price / level_size) * level_size, 5)
+
+
 # ── ATR ───────────────────────────────────────────────────────────────────────
 
 def compute_atr(ohlcv: pd.DataFrame, period: int = 14) -> float:

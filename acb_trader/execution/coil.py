@@ -13,7 +13,7 @@ from acb_trader.config import (
     ET,
     EMA_COIL_PERIODS, EMA_COIL_TIGHT_MULT, EMA_COIL_DAILY_MULT, EMA_ENTRY_PERIOD,
     COIL_SIDEWAYS_BARS, TWO_SIDED_PIPS, TWO_SIDED_CANDLES,
-    COIL_SIDEWAYS_ATR_MULT,
+    COIL_SIDEWAYS_ATR_MULT, COIL_SIDEWAYS_ATR_MULT_DAILY,
 )
 from acb_trader.db.models import CoilState, InitialBalance, Setup
 from acb_trader.data.levels import (
@@ -54,7 +54,10 @@ def has_ema_coil_htf(
 
     # Last 3 bars sideways
     last3_range = float(ohlcv_htf["high"].iloc[-3:].max() - ohlcv_htf["low"].iloc[-3:].min())
-    coil_sideways = last3_range <= COIL_SIDEWAYS_ATR_MULT * atr14   # Configurable ATR multiplier
+    # Daily bars have naturally wider ranges than intraday — use the relaxed
+    # daily multiplier (2.5×) so genuine daily compressions pass the gate.
+    sw_mult = COIL_SIDEWAYS_ATR_MULT_DAILY if timeframe == "DAILY" else COIL_SIDEWAYS_ATR_MULT
+    coil_sideways = last3_range <= sw_mult * atr14
     return coil_tight and coil_sideways
 
 

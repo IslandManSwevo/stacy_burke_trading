@@ -62,6 +62,9 @@ class ScoreBreakdown:
     frd_fgd_structural: int   = 0   # FRD/FGD: prior 3HC/3LC streak confirmed (not tied to Wed/Thu)
     mfb_structural:     int   = 0   # MFB: Monday locked HOW/LOW — Tue entry equally valid as Thu
 
+    # Three-box exhaustion (+2 when entry aligns with 3-box grid exhaustion zone)
+    three_box_exhaustion: int = 0   # price drove through 3 institutional boxes → trap is BUILT
+
     # Minor bonuses (+1 each)
     backside_phase:     int   = 0   # monthly phase == BACKSIDE
     signal_day_label:   int   = 0   # 3HC/3LC countdown label == SIGNAL_DAY
@@ -79,7 +82,8 @@ class ScoreBreakdown:
             ("Near HCOW/LCOW",       self.near_hcow_lcow),
             ("Pattern bonus",        self.pattern_bonus),
             ("PARA level stack",     self.para_level_stack),            ("FRD/FGD structural",   self.frd_fgd_structural),
-            ("MFB structural",        self.mfb_structural),            ("Backside phase",       self.backside_phase),
+            ("MFB structural",        self.mfb_structural),
+            ("3-box exhaustion",      self.three_box_exhaustion),            ("Backside phase",       self.backside_phase),
             ("3HC/3LC SIGNAL_DAY",   self.signal_day_label),
         ]
         for label, pts in mapping:
@@ -193,6 +197,16 @@ def score_setup(
     if setup.pattern == "MONDAY_FALSE_BREAK":
         bd.mfb_structural = 2
 
+    # ── Three-box exhaustion bonus ───────────────────────────────────────────
+    # When the setup's entry price aligns with a 3-box grid exhaustion level
+    # (price has traversed 3 consecutive 25-pip boxes from the anchor and
+    # stalled at a Major Round Number or Quarter level), the trap is fully built.
+    # +2 because the institutional "Pump" or "Dump" has exhausted itself —
+    # breakout traders are hopelessly trapped at the extreme.
+    _tba = getattr(setup, '_three_box_analysis', None)
+    if _tba is not None and _tba.at_exhaustion and _tba.boxes_completed >= 3:
+        bd.three_box_exhaustion = 2
+
     # ── Minor bonuses ─────────────────────────────────────────────────────────
 
     if template.monthly_phase == "BACKSIDE":
@@ -215,6 +229,7 @@ def score_setup(
         + bd.para_level_stack
         + bd.frd_fgd_structural
         + bd.mfb_structural
+        + bd.three_box_exhaustion
         + bd.backside_phase
         + bd.signal_day_label
     )

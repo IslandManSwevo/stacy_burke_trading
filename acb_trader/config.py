@@ -43,6 +43,16 @@ THREE_LEVELS = {
     "INDEXES":    {"L1": 250, "L2": 500, "L3": 750},
 }
 
+# 25-pip box grid for "Three Levels of Rise or Fall"
+# Each box = the distance between institutional 00/25/50/75 quarter levels.
+# Three consecutive boxes = one expansion cycle = intraday exhaustion.
+BOX_SIZE_PIPS = {
+    "CURRENCIES": 25,     # 3 × 25 = 75-pip intraday exhaustion
+    "GOLD":       50,     # $5.00 increments (pip=0.1 → 50 pips = $5)
+    "OIL":        50,     # $0.50 increments
+    "INDEXES":    25,     # 25-point increments on S&P / Nasdaq / Dow
+}
+
 INSTRUMENT_CLASS = {
     "EURUSD": "CURRENCIES", "GBPUSD": "CURRENCIES", "USDJPY": "CURRENCIES",
     "USDCHF": "CURRENCIES", "USDCAD": "CURRENCIES", "AUDUSD": "CURRENCIES",
@@ -123,6 +133,36 @@ TRAIL_STEP_PIPS      = 20                   # Tranche C trail: step size in pips
 # ── BACKTEST TRANSACTION COSTS ──────────────────────────────────────────────
 BACKTEST_HALF_SPREAD_PIPS = 1.5             # Half-spread per fill (entry + exit)
 BACKTEST_SLIPPAGE_PIPS    = 0.5             # Execution slippage per fill
+
+# ── BACKTEST INTRADAY STOP SIMULATION ────────────────────────────────────────
+# In live trading the 15-min EMA coil gives tight 15–20 pip stops (currencies).
+# The backtester only has daily bars, so stops are set from daily high/low + 2 pips
+# (typically 40–80 pips for currencies).  This inflates risk_pips, deflates R:R,
+# and blocks the tight_stop (+2) and rr_3to1 (+2) scoring bonuses.
+# When a setup's daily-bar stop exceeds 1.5× the simulated value, override it to
+# model what a live coil entry would achieve.  Values per instrument class:
+BACKTEST_SIMULATED_STOP_PIPS = {
+    "CURRENCIES": 20,    # Live coil stops: 15–25 pips
+    "GOLD":       80,    # Live coil stops: 50–100 pips
+    "OIL":        80,    # Live coil stops: 50–100 pips
+    "INDEXES":    150,   # Live coil stops: 100–200 pips
+}
+
+# ── BACKTEST NEWS FIRST-BOUNCE ───────────────────────────────────────────────
+# MRN events (NFP, CPI, FOMC) can delay entry by 1 session. In live trading the
+# news_rearm module waits for the post-news settle, then enters on the first
+# bounce.  In backtesting we simulate this by extending the fill window by N bars
+# beyond entry_date — if the limit order isn't filled on entry_date, it survives
+# one more bar before expiring.  Set to 0 to disable.
+BACKTEST_NEWS_LOOKAHEAD_BARS = 1
+
+# ── COIL SIDEWAYS MULTIPLIER (DAILY) ─────────────────────────────────────────
+# has_ema_coil_htf() requires the last 3 daily bars to be sideways (range ≤ N×ATR).
+# The intraday multiplier (2.0) is correct for 15-min data, but daily bars have
+# naturally wider ranges.  Using 2.0 on daily data blocks valid compressions where
+# the EMAs have converged but the 3-bar range is 2.0–2.5× ATR.
+# 2.5× admits genuine daily compressions while still rejecting expansion phases.
+COIL_SIDEWAYS_ATR_MULT_DAILY = 2.5
 
 # ── OPENING RANGE ────────────────────────────────────────────────────────────
 MIN_OPENING_RANGE_PIPS = 40                 # Mon+Tue range < 40 pips = dead week

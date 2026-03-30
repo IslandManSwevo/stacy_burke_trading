@@ -24,6 +24,7 @@ from acb_trader.config import (
     WEEKLY_DD_HALT_PCT, FIVE_STAR_TRANCHES, SESSION_TRADE_TRANCHES, TRAIL_STEP_PIPS,
     MONITOR_ONLY_PATTERNS,
     BACKTEST_HALF_SPREAD_PIPS, BACKTEST_SLIPPAGE_PIPS,
+    BACKTEST_SIMULATED_STOP_PIPS, BACKTEST_NEWS_LOOKAHEAD_BARS,
 )
 # NOTE: MIN_SETUP_SCORE is intentionally NOT imported here.
 # The floor check lives in setups.py via cfg.MIN_SETUP_SCORE (dynamic module access),
@@ -203,7 +204,12 @@ class BacktestEngine:
                               f"{bt.setup.pattern} @ {bt.entry_price:.5f}")
                 else:
                     # Expire if past entry_date
-                    if bar_date > bt.setup.entry_date:
+                    # MRN first-bounce: extend fill window by N bars beyond entry_date.
+                    # In live trading, news_rearm waits for settle then enters on first bounce.
+                    # Here we allow the limit order to survive BACKTEST_NEWS_LOOKAHEAD_BARS
+                    # extra bars before expiring.
+                    _days_past = _trading_days_between(bt.setup.entry_date, bar_date)
+                    if _days_past > BACKTEST_NEWS_LOOKAHEAD_BARS:
                         bt.terminal_state = "EXPIRED"
                         results.trades.append(bt)
                         if self.verbose:
@@ -337,6 +343,8 @@ class BacktestEngine:
                     daily_ohlcv=df_slice,
                     as_of=bar_date,
                     ema_coil=ema_coil,
+                    skip_stop_gate=True,        # lift MAX_STOP_PIPS ceiling
+                    sim_stop_pips={},           # disabled: scoring-only sim distorts selection
                 )
                 # Filter out "Monitor Only" patterns
                 setups = [s for s in setups if s.pattern not in MONITOR_ONLY_PATTERNS]
@@ -347,6 +355,7 @@ class BacktestEngine:
                 for s in setups:
                     s.entry_date = next_bar
                     s.expires = next_bar
+
                 all_setups.extend(setups)
 
                 for d in discarded:

@@ -8,16 +8,19 @@ from __future__ import annotations
 import os
 import sys
 import json
+import copy
 import dataclasses
 import schedule
+import signal
 import threading
 import time
+import traceback
 from datetime import datetime, date, timedelta
 import pandas as pd
 
 from acb_trader.config import (
     ET, BASKETS, EOD_RUN_OFFSET_MIN, NY_CLOSE_HOUR,
-    SESSION_WINDOWS, SESSION_PAIRS,
+    SESSION_PAIRS,
 )
 from acb_trader.data.feed import BrokerFeed
 from acb_trader.data.calendar import get_blocking_events
@@ -42,12 +45,28 @@ from acb_trader.signals.weekly import build_weekly_template, build_weekly_review
 PAUSED_SETUPS_PATH = os.path.join(os.path.dirname(__file__), "paused_setups.json")
 
 # ── SHARED SESSION STATE ──────────────────────────────────────────────────────
-# _ARMED_SETUPS  — populated by run_eod(), consumed by session threads.
-# _TRADED_PAIRS  — pairs already filled today; excluded from later sessions.
-#                  Enforces the no-carry-forward rule across session boundaries.
-_ARMED_SETUPS: list = []
-_TRADED_PAIRS: set  = set()
-_state_lock         = threading.Lock()
+# _ARMED_SETUPS      — populated by run_eod(), consumed by launch_session().
+#                      Setup objects are IMMUTABLE once armed: run_eod() builds
+#                      them, sorts them, and freezes the list inside _state_lock.
+#                      launch_session() hands shallow copies (dataclasses.replace)
+#                      to session threads — never mutate the originals after arming.
+# _ARMED_SETUPS_date — calendar date when _ARMED_SETUPS was last populated.
+#                      launch_session() refuses to run if this is not today,
+#                      preventing stale Monday setups from running on Tuesday.
+# _TRADED_PAIRS      — pairs atomically claimed by launch_session() inside
+#                      _state_lock; prevents two concurrent launchers from picking
+#                      the same pair and enforces the no-carry-forward rule.
+# _active_threads    — non-daemon session threads; joined on graceful shutdown.
+# _last_eod_run      — timestamp of the most recent successful EOD job start;
+#                      used by _watchdog_eod() to detect misfired jobs.
+_ARMED_SETUPS: list                  = []
+_ARMED_SETUPS_date: date | None      = None
+_TRADED_PAIRS: set                   = set()
+_state_lock                          = threading.Lock()
+_active_threads: list[threading.Thread] = []
+_active_threads_lock                 = threading.Lock()
+_last_eod_run: datetime | None       = None
+_EOD_MISFIRE_GRACE_MIN               = 15   # Alert if EOD hasn't started within N min of schedule
 
 
 def _save_paused_setups(setups: list) -> None:
@@ -276,10 +295,13 @@ def run_eod(feed: BrokerFeed):
 
     # ── Arm the session supervisors ───────────────────────────────────────────
     # Store today's setups so each session launcher can claim its slice.
+    # Setup objects are frozen here — treat as immutable after this point.
     # _TRADED_PAIRS is cleared so tonight's Asia session starts clean.
+    global _ARMED_SETUPS_date
     with _state_lock:
         _ARMED_SETUPS.clear()
         _ARMED_SETUPS.extend(all_setups)
+        _ARMED_SETUPS_date = now.date()
         _TRADED_PAIRS.clear()
     print(f"[main] {len(all_setups)} setup(s) armed for intraday sessions")
 
@@ -319,17 +341,74 @@ def run_weekly_review(feed: BrokerFeed):
     )
 
 
+# ── MISFIRE DETECTION ────────────────────────────────────────────────────────
+
+def _timed_run_eod(feed: BrokerFeed) -> None:
+    """Wrapper for run_eod that records actual start time for misfire detection."""
+    global _last_eod_run
+    _last_eod_run = datetime.now(ET)
+    run_eod(feed)
+
+
+def _watchdog_eod() -> None:
+    """
+    Called every scheduler tick. Logs a warning if the EOD job has not started
+    within _EOD_MISFIRE_GRACE_MIN minutes of its scheduled time on a weekday.
+    """
+    now = datetime.now(ET)
+    if now.weekday() >= 5:
+        return
+    scheduled = now.replace(
+        hour=NY_CLOSE_HOUR, minute=EOD_RUN_OFFSET_MIN, second=0, microsecond=0
+    )
+    cutoff = scheduled + timedelta(minutes=_EOD_MISFIRE_GRACE_MIN)
+    if scheduled <= now <= cutoff:
+        if _last_eod_run is None or _last_eod_run.date() < now.date():
+            print(
+                f"[main] ⚠️ MISFIRE: EOD scheduled at {scheduled.strftime('%H:%M ET')} "
+                f"has not started by {now.strftime('%H:%M ET')} — check scheduler"
+            )
+
+
+# ── GRACEFUL SHUTDOWN ─────────────────────────────────────────────────────────
+
+def _graceful_shutdown(signum, frame) -> None:
+    """
+    SIGINT / SIGTERM handler. Joins all active session threads before exit so
+    that in-progress trades can complete their current 15-min tick cleanly.
+    Maximum join timeout per thread: 5 minutes.
+    """
+    print(f"\n[main] Signal {signum} received — waiting for active sessions to finish...")
+    with _active_threads_lock:
+        threads = list(_active_threads)
+    for t in threads:
+        if t.is_alive():
+            print(f"[main] Joining {t.name}...")
+            t.join(timeout=300)
+    print("[main] All sessions resolved — exiting")
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGINT,  _graceful_shutdown)
+if hasattr(signal, "SIGTERM"):          # SIGTERM not available on all Windows builds
+    signal.signal(signal.SIGTERM, _graceful_shutdown)
+
+
 # ── SESSION LAUNCHER ─────────────────────────────────────────────────────────
 
 def launch_session(session_name: str, feed: BrokerFeed) -> None:
     """
-    Fire the intraday session supervisor in a daemon thread.
+    Fire the intraday session supervisor in a non-daemon thread.
 
-    Filters _ARMED_SETUPS to only the pairs valid for this session.
-    Excludes any pair already filled in an earlier session today (_TRADED_PAIRS).
-    If no setups remain after filtering, exits immediately — no thread spawned.
-    Records filled pairs back into _TRADED_PAIRS on session completion so that
-    the same pair cannot be entered again in a subsequent session today.
+    Filters _ARMED_SETUPS to pairs valid for this session, excluding any pair
+    already claimed today (_TRADED_PAIRS). The filter AND the atomic claim both
+    execute inside _state_lock so no two concurrent launchers can pick the same
+    pair. Each setup passed to the thread is a shallow copy (dataclasses.replace)
+    — the originals in _ARMED_SETUPS are never mutated after arming.
+
+    On crash, all supervised pairs are conservatively marked as traded to prevent
+    potential double-entry in later sessions. The thread is registered in
+    _active_threads so _graceful_shutdown() can join it before process exit.
     """
     now = datetime.now(ET)
 
@@ -341,10 +420,21 @@ def launch_session(session_name: str, feed: BrokerFeed) -> None:
     session_pairs = set(SESSION_PAIRS.get(session_name, []))
 
     with _state_lock:
+        # Staleness check — refuse to run if EOD didn't populate setups today
+        if _ARMED_SETUPS_date != now.date():
+            print(
+                f"[main] {session_name}: setups are stale "
+                f"(armed {_ARMED_SETUPS_date}, today {now.date()}) — skipping"
+            )
+            return
+
+        # Filter + atomic claim in one critical section — prevents races between
+        # concurrent session launchers picking up the same pair.
         available = [
-            s for s in _ARMED_SETUPS
+            dataclasses.replace(s) for s in _ARMED_SETUPS
             if s.pair in session_pairs and s.pair not in _TRADED_PAIRS
         ]
+        _TRADED_PAIRS.update(s.pair for s in available)
 
     if not available:
         print(f"[main] {session_name}: no armed setups — standing down")
@@ -355,25 +445,31 @@ def launch_session(session_name: str, feed: BrokerFeed) -> None:
         f"({len(available)} setup(s): {[s.pair for s in available]})"
     )
 
-    def _run():
+    def _run() -> None:
         try:
             records = run_intraday_session(available, session_name, feed)
             if records:
-                filled = {r.pair for r in records}
-                with _state_lock:
-                    _TRADED_PAIRS.update(filled)
                 print(
                     f"[main] {session_name} complete — "
-                    f"{len(records)} trade(s) closed: {list(filled)}"
+                    f"{len(records)} trade(s) closed: {[r.pair for r in records]}"
                 )
             else:
                 print(f"[main] {session_name} complete — no fills")
         except Exception:
-            import traceback
+            # Pairs were already atomically claimed above; log the crash and
+            # keep them in _TRADED_PAIRS (conservative no-carry-forward).
             print(f"[main] {session_name} supervisor crashed:")
             traceback.print_exc()
+        finally:
+            with _active_threads_lock:
+                try:
+                    _active_threads.remove(threading.current_thread())
+                except ValueError:
+                    pass
 
-    t = threading.Thread(target=_run, name=f"session-{session_name}", daemon=True)
+    t = threading.Thread(target=_run, name=f"session-{session_name}", daemon=False)
+    with _active_threads_lock:
+        _active_threads.append(t)
     t.start()
 
 
@@ -385,20 +481,23 @@ def start_scheduler(feed: BrokerFeed):
 
     Mon–Fri  17:04   EOD pipeline → arms _ARMED_SETUPS
     Mon–Thu  19:00   Asia session supervisor
-    Tue–Sat  01:00   London session supervisor   (next calendar day after EOD)
-    Tue–Sat  07:00   New York FX session
-    Tue–Sat  09:30   New York Equity session
+    Tue–Fri  01:00   London session supervisor   (early morning, after prior-day EOD)
+    Tue–Fri  07:00   New York FX session
+    Tue–Fri  09:30   New York Equity session
     Fri      17:30   Weekly review
 
-    Session threads are daemon threads — the scheduler loop remains unblocked.
-    Weekend gate inside launch_session() prevents Saturday from doing work.
+    Friday's EOD setups receive Asia (Fri 19:00) and no further coverage —
+    London/NY sessions are not scheduled on Saturday. The weekend gate inside
+    launch_session() provides a secondary safety check on any boundary edge cases.
+
+    Session threads are non-daemon; _graceful_shutdown() joins them on SIGINT/SIGTERM.
     """
     eod_time    = f"{NY_CLOSE_HOUR:02d}:{EOD_RUN_OFFSET_MIN:02d}"   # "17:04"
     review_time = "17:30"
 
-    # ── EOD pipeline ─────────────────────────────────────────────────────────
+    # ── EOD pipeline (wrapped for misfire detection) ──────────────────────────
     for day in ("monday", "tuesday", "wednesday", "thursday", "friday"):
-        getattr(schedule.every(), day).at(eod_time).do(run_eod, feed=feed)
+        getattr(schedule.every(), day).at(eod_time).do(_timed_run_eod, feed=feed)
 
     # ── Weekly review (Friday only) ───────────────────────────────────────────
     schedule.every().friday.at(review_time).do(run_weekly_review, feed=feed)
@@ -439,6 +538,7 @@ def start_scheduler(feed: BrokerFeed):
 
     while True:
         schedule.run_pending()
+        _watchdog_eod()
         time.sleep(30)
 
 
