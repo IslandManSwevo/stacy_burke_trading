@@ -27,12 +27,17 @@ def _send(text: str) -> bool:
             "https": proxy_url,
         }
 
+    kwargs = {
+        "json": {"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+        "timeout": 10,
+    }
+    if proxies:
+        kwargs["proxies"] = proxies
+
     try:
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-            proxies=proxies if proxies else None,
+            **kwargs
         )
         return resp.ok
     except Exception as e:
@@ -183,3 +188,31 @@ def send_weekly_review(report: WeeklyReviewReport) -> bool:
         lines.append("\n⏸ <b>No trades taken this week</b> — sat on hands")
 
     return _send("\n".join(lines))
+
+
+def get_updates(offset: int | None = None) -> list:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    proxy_url = os.environ.get("TELEGRAM_PROXY", "")
+    if not token:
+        return []
+
+    proxies = {}
+    if proxy_url:
+        proxies = {"http": proxy_url, "https": proxy_url}
+
+    params = {"timeout": 30}
+    if offset:
+        params["offset"] = offset
+
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{token}/getUpdates",
+            params=params,
+            timeout=35,
+            proxies=proxies if proxies else None,
+        )
+        if resp.ok:
+            return resp.json().get("result", [])
+    except Exception:
+        pass
+    return []

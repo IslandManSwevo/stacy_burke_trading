@@ -34,7 +34,7 @@ from acb_trader.execution.session import run_intraday_session
 from acb_trader.guards.checklist import run_pre_trade_checklist, passes_100_lot_test
 from acb_trader.notifications.telegram import (
     send_eod_briefing, send_setup_armed, send_health_warnings, send_circuit_breaker,
-    send_weekly_review,
+    send_weekly_review, _send, get_updates
 )
 from acb_trader.db.models import AccountState
 from acb_trader.db.session_tracker import (
@@ -441,6 +441,11 @@ def _graceful_shutdown(signum, frame) -> None:
             if t.is_alive():
                 print(f"[main] ⚠️ TIMEOUT: {t.name} hung after 300s, skipping join")
     print("[main] All sessions resolved — exiting")
+    try:
+        from acb_trader.notifications.telegram import _send
+        _send("🔴 <b>SYSTEM OFFLINE</b>\nACB Trader daemon has been terminated. Intraday execution is now suspended.")
+    except Exception:
+        pass
     raise SystemExit(0)
 
 
@@ -581,8 +586,71 @@ def start_scheduler(feed: BrokerFeed):
             launch_session, session_name="NEW_YORK_EQ", feed=feed
         )
 
-    print(
-        f"[main] Scheduler armed\n"
+    # ── Telegram Command Listener ──────────────────────────────────────────
+    def _command_loop():
+        # Clean current updates so we don't process old commands from hours ago
+        updates = get_updates()
+        offset = (updates[-1].get("update_id") + 1) if updates else None
+        
+        while True:
+            try:
+                updates = get_updates(offset=offset)
+                for up in updates:
+                    offset = up.get("update_id") + 1
+                    msg = up.get("message", {})
+                    text = msg.get("text", "").strip().lower()
+                    chat_id = str(msg.get("chat", {}).get("id", ""))
+                    target_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+                    if chat_id != target_chat:
+                        continue
+
+                    if text == "/ping":
+                        _send("🏓 <b>Pong!</b> System is responsive.")
+                    
+                    elif text == "/status":
+                        with _active_threads_lock:
+                            threads = [t.name for t in _active_threads if t.is_alive()]
+                        sessions_str = f"Sessions: {threads}" if threads else "Sessions: Dormant"
+                        with _state_lock:
+                            setups_str = f"Armed Setups: {len(_ARMED_SETUPS)}"
+                            traded_str = f"Traded Today: {len(_TRADED_PAIRS)}"
+                        _send(f"🤖 <b>SYSTEM STATUS</b>\n{sessions_str}\n{setups_str}\n{traded_str}")
+
+                    elif text == "/balance":
+                        try:
+                            acc = feed.get_account()
+                            bal = acc.get('balance', 0)
+                            eq  = acc.get('equity', 0)
+                            _send(f"💰 <b>ACCOUNT</b>\nBalance: ${bal:,.2f}\nEquity:  ${eq:,.2f}")
+                        except Exception as e:
+                            _send(f"❌ Error fetching account: {e}")
+
+                    elif text == "/setups":
+                        with _state_lock:
+                            if not _ARMED_SETUPS:
+                                _send("⏸ <b>No setups currently armed.</b>")
+                            else:
+                                pairs = [s.pair for s in _ARMED_SETUPS]
+                                _send(f"🎯 <b>ARMED SETUPS</b>\n{', '.join(pairs)}")
+
+                    elif text == "/help":
+                        _send(
+                            "🆘 <b>Available Commands</b>\n"
+                            "/status - Show active sessions & setup count\n"
+                            "/balance - Current MT5 Balance/Equity\n"
+                            "/setups - List currently armed pairs\n"
+                            "/ping - Heartbeat check"
+                        )
+            except Exception:
+                time.sleep(5)
+            time.sleep(2)
+
+    cmd_thread = threading.Thread(target=_command_loop, name="telegram-listener", daemon=True)
+    cmd_thread.start()
+
+    msg = (
+        f"Scheduler Armed\n"
         f"  EOD:        {eod_time} ET  Mon–Fri\n"
         f"  Asia:       19:00 ET  Mon–Thu\n"
         f"  London:     01:00 ET  Tue–Fri\n"
@@ -590,6 +658,11 @@ def start_scheduler(feed: BrokerFeed):
         f"  NY Equity:  09:30 ET  Tue–Fri\n"
         f"  Review:     {review_time} ET  Fri"
     )
+    print(f"[main] {msg}")
+    try:
+        _send(f"🟢 <b>ACB Trader Online</b>\n<pre>{msg}</pre>")
+    except Exception as e:
+        print(f"[main] Failed to send Telegram startup alert: {e}")
 
     while True:
         schedule.run_pending()

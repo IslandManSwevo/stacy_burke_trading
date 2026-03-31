@@ -170,3 +170,6 @@ backtest_equity_curve.png
 tmp_debug_backtest.py
 archive/
 backtest_data/
+acb_trader/db/discard_log.jsonl
+acb_trader/db/session_state.json
+tmp_telegram_ping.py
